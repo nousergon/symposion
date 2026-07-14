@@ -1,0 +1,5 @@
+node_modules/
+*.log
+*.jsonl
+.claude/
+.DS_Store

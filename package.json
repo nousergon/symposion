@@ -1,0 +1,18 @@
+{
+  "name": "symposion",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.18.1",
+    "express": "^5.2.1",
+    "opencode-ai": "^1.18.1"
+  }
+}

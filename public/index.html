@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>symposion</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <span class="brand">symposion</span>
+        <button id="new-agent-btn">+ New Agent</button>
+      </div>
+      <ul id="persona-list"></ul>
+    </aside>
+    <main class="chat">
+      <div class="chat-header" id="chat-header">Select or create an agent to begin</div>
+      <div class="chat-messages" id="chat-messages"></div>
+      <form class="chat-input" id="chat-form">
+        <input id="chat-text" type="text" placeholder="Message this agent..." autocomplete="off" disabled />
+        <button type="submit" disabled>Send</button>
+      </form>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="new-agent-modal" hidden>
+    <div class="modal">
+      <h3>New Agent</h3>
+      <label>Name</label>
+      <input id="new-agent-name" type="text" placeholder="e.g. Scout" autocomplete="off" />
+      <label>Backend</label>
+      <div class="backend-toggle">
+        <button type="button" class="backend-btn active" data-backend="api">API</button>
+        <button type="button" class="backend-btn" data-backend="claude-code">Claude Code</button>
+      </div>
+      <label>Workspace (any absolute path)</label>
+      <input id="new-agent-workspace" type="text" list="workspace-datalist" placeholder="/path/to/any/project" autocomplete="off" />
+      <datalist id="workspace-datalist"></datalist>
+      <label>Model</label>
+      <select id="new-agent-model"></select>
+      <div class="modal-actions">
+        <button type="button" id="new-agent-cancel">Cancel</button>
+        <button type="button" id="new-agent-create">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
