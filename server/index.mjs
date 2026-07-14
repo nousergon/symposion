@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { ClaudeCodeSession, CLAUDE_MODELS } from "./claude-code-backend.mjs";
 import { OpenCodeServerPool } from "./opencode-pool.mjs";
+import { loadPersonas, savePersonas, toRecord } from "./store.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEV_ROOT = path.join(os.homedir(), "Development");
@@ -27,9 +28,39 @@ const DEFAULT_WORKSPACE = path.join(DEV_ROOT, "symposion");
 /**
  * Persona shape (union over both backends):
  * { id, name, backend: "api"|"claude-code", providerID?, modelID, workspaceDir,
- *   sessionID?, claudeSession?, lastActivityTs, messages: [], lastDenials: [] }
+ *   sessionID?, claudeSession?, opencodeEntry?, lastActivityTs, messages: [],
+ *   lastDenials: [] }
+ * claudeSession/opencodeEntry are null until ensureConnected() lazily
+ * (re)connects them - true right after loading from disk on startup.
  */
 const personas = new Map();
+
+function persistAll() {
+  savePersonas([...personas.values()].map(toRecord));
+}
+
+for (const record of loadPersonas()) {
+  personas.set(record.id, {
+    ...record,
+    claudeSession: null,
+    opencodeEntry: null,
+  });
+}
+console.log(`[store] loaded ${personas.size} persona(s) from disk`);
+
+/** Lazily (re)connect a persona's backend process/session after a restart. */
+async function ensureConnected(persona) {
+  if (persona.backend === "claude-code") {
+    if (persona.claudeSession && persona.claudeSession.alive) return;
+    const resuming = persona.messages.length > 0;
+    persona.claudeSession = new ClaudeCodeSession(persona.id, persona.modelID, persona.name, persona.workspaceDir, resuming);
+  } else {
+    if (persona.opencodeEntry) return;
+    const entry = pool.getOrCreate(persona.workspaceDir);
+    await entry.ready;
+    persona.opencodeEntry = entry;
+  }
+}
 
 function ttlInfo(persona) {
   const elapsed = Date.now() - persona.lastActivityTs;
@@ -53,7 +84,7 @@ function personaSummary(p) {
     workspaceName: path.basename(p.workspaceDir),
     ttlRemainingMs: remainingMs,
     ttlStatus: status,
-    alive: p.backend === "claude-code" ? p.claudeSession.alive : true,
+    alive: p.backend === "claude-code" ? (p.claudeSession ? p.claudeSession.alive : true) : true,
     blocked: (p.lastDenials?.length ?? 0) > 0,
   };
 }
@@ -159,6 +190,7 @@ app.post("/api/personas", async (req, res) => {
     }
 
     personas.set(persona.id, persona);
+    persistAll();
     res.status(201).json(personaSummary(persona));
   } catch (err) {
     console.error(err);
@@ -181,6 +213,8 @@ app.post("/api/personas/:id/messages", async (req, res) => {
   persona.messages.push({ role: "user", text, ts: Date.now() });
 
   try {
+    await ensureConnected(persona);
+
     let replyText;
     let denials = [];
 
@@ -216,6 +250,7 @@ app.post("/api/personas/:id/messages", async (req, res) => {
       blocked: denials.length > 0,
       denials,
     });
+    persistAll();
 
     res.json({ persona: personaSummary(persona), reply: replyText, denials });
   } catch (err) {

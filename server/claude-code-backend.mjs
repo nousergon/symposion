@@ -18,7 +18,13 @@ export const CLAUDE_MODELS = [
 ];
 
 export class ClaudeCodeSession {
-  constructor(sessionId, model, personaName, workspaceDir) {
+  /**
+   * @param {boolean} resume - true when reconnecting to a persona that
+   *   already existed before a server restart: uses --resume so claude-code's
+   *   own on-disk session history is picked back up, instead of --session-id
+   *   which would start a brand-new (empty) session under that id.
+   */
+  constructor(sessionId, model, personaName, workspaceDir, resume = false) {
     this.sessionId = sessionId;
     this.model = model;
     this.alive = true;
@@ -30,12 +36,14 @@ export class ClaudeCodeSession {
     // deny it if asked. This makes the identity real, not just a sidebar label.
     const identityPrompt = `Your name is ${personaName}. If asked your name or who you are, identify yourself as ${personaName}.`;
 
+    const sessionArgs = resume ? ["--resume", sessionId] : ["--session-id", sessionId];
+
     this.proc = spawn("claude", [
       "-p",
       "--output-format", "stream-json",
       "--input-format", "stream-json",
       "--verbose",
-      "--session-id", sessionId,
+      ...sessionArgs,
       "--model", model,
       "--append-system-prompt", identityPrompt,
     ], { cwd: workspaceDir, stdio: ["pipe", "pipe", "pipe"] });

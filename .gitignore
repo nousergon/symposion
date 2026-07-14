@@ -3,3 +3,4 @@ node_modules/
 *.jsonl
 .claude/
 .DS_Store
+data/
