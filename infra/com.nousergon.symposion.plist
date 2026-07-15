@@ -29,10 +29,16 @@
   <key>StandardErrorPath</key>
   <string>/Users/brianmcmahon/Library/Logs/symposion.err.log</string>
 
+  <!-- Includes ~/.local/bin - confirmed live (2026-07-15) that claude lives
+       there, and this PATH not including it caused spawn("claude", ...) to
+       fail with ENOENT under launchd (worked fine in an interactive
+       terminal, where PATH is set by the shell profile instead). Belt-and-
+       suspenders alongside claude-code-backend.mjs's own direct-filesystem
+       binary resolution, which no longer depends on PATH at all for this. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>/Users/brianmcmahon/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
 </dict>
 </plist>

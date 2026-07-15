@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
 import readline from "node:readline";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 // Persistent claude -p subprocess per persona, keyed off the empirical
 // findings from the symposion spikes:
@@ -9,6 +12,29 @@ import readline from "node:readline";
 //    shows up as a non-empty `permission_denials` array on the turn's
 //    `result` event, after the fact, not as a mid-turn prompt
 //  - --output-format stream-json requires --verbose alongside --print
+
+// Resolved via direct filesystem checks, not PATH lookup - confirmed live
+// (2026-07-15) that launchd's LaunchAgent environment has a minimal PATH
+// (set in infra/com.nousergon.symposion.plist) that doesn't include
+// wherever `claude` actually lives, causing `spawn("claude", ...)` to fail
+// with ENOENT under supervision even though it works fine in an interactive
+// terminal. Checking known install locations directly sidesteps needing
+// `which`/PATH resolution to work correctly in the first place - the
+// plist's PATH was also fixed to include the confirmed real location, but
+// this is the actual root-cause fix: don't depend on PATH-based binary
+// resolution for a subprocess spawn in an environment-sensitive context.
+function resolveClaudeBinary() {
+  const candidates = [
+    path.join(os.homedir(), ".local", "bin", "claude"),
+    "/opt/homebrew/bin/claude",
+    "/usr/local/bin/claude",
+  ];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return "claude"; // last resort - PATH-based lookup, same as before this fix
+}
+const CLAUDE_BIN = resolveClaudeBinary();
 
 export const CLAUDE_MODELS = [
   { modelID: "claude-sonnet-5", name: "Sonnet 5" },
@@ -60,7 +86,7 @@ export class ClaudeCodeSession {
     const sessionArgs = resume ? ["--resume", sessionId] : ["--session-id", sessionId];
     const permissionArgs = permissionMode ? ["--permission-mode", permissionMode] : [];
 
-    this.proc = spawn("claude", [
+    this.proc = spawn(CLAUDE_BIN, [
       "-p",
       "--output-format", "stream-json",
       "--input-format", "stream-json",
@@ -93,7 +119,30 @@ export class ClaudeCodeSession {
       console.error(`[claude:${sessionId}] stderr:`, d.toString());
     });
 
+    // A spawn failure (bad binary path, permissions, etc.) emits 'error',
+    // not 'exit' - without a listener here it's an UNCAUGHT exception that
+    // crashes the entire symposion process, taking every other running
+    // persona down with it (confirmed live 2026-07-15: one persona's ENOENT
+    // killed the whole server). This mirrors 'exit' below, guarded by a
+    // dedicated flag (not `this.alive`, which kill() already sets false
+    // synchronously on a normal delete-mid-turn - reusing it here would
+    // wrongly skip 'exit's queue-drain in that case) so double-firing (both
+    // events can fire for the same underlying failure, depending on Node
+    // version) doesn't double-reject an already-cleared queue.
+    let terminalHandled = false;
+    this.proc.on("error", (err) => {
+      if (terminalHandled) return;
+      terminalHandled = true;
+      this.alive = false;
+      this.crashError = `claude process failed to start: ${err.message}`;
+      console.error(`[claude:${sessionId}] spawn error:`, err);
+      for (const { reject } of this.queue) reject(new Error(this.crashError));
+      this.queue = [];
+    });
+
     this.proc.on("exit", (code, signal) => {
+      if (terminalHandled) return;
+      terminalHandled = true;
       this.alive = false;
       if (this.queue.length > 0) {
         this.crashError = `claude process exited (code=${code}, signal=${signal}) while a message was in flight`;
