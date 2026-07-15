@@ -46,3 +46,18 @@ rm ~/Library/LaunchAgents/com.nousergon.symposion.plist
 ```
 tail -f ~/Library/Logs/symposion.log ~/Library/Logs/symposion.err.log
 ```
+
+# Desktop launcher (macOS app)
+
+`Symposion.applescript` compiles into a real double-clickable/Dock-able `.app` that just opens `http://localhost:5173` in your default browser - no networking changes, stays entirely local. Deliberately NOT a tunnel/public-hosting setup - symposion depends on your local `claude`/`opencode` auth and your actual local repos, so it stays laptop-only; this just makes opening it a one-click action instead of remembering a URL.
+
+## Install
+
+```
+mkdir -p ~/Applications
+osacompile -o ~/Applications/Symposion.app infra/Symposion.applescript
+```
+
+Then drag `~/Applications/Symposion.app` onto the Dock for one-click access (or launch it from Launchpad/Spotlight like any other app). Requires the LaunchAgent above (or a manually-started server) already running - the launcher just opens the browser, it doesn't start the server itself.
+
+To give it a custom icon: select the app in Finder → Get Info → drag an image onto the icon in the top-left of the Info panel.
