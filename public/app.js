@@ -1,6 +1,7 @@
 let activePersonaId = null;
 let providers = [];
 let claudeModels = [];
+let permissionModes = [];
 let workspaces = [];
 let defaults = null;
 let selectedBackend = "api";
@@ -22,6 +23,8 @@ const modalModelEl = document.getElementById("new-agent-model");
 const modalCancelEl = document.getElementById("new-agent-cancel");
 const modalCreateEl = document.getElementById("new-agent-create");
 const modalWorkspaceEl = document.getElementById("new-agent-workspace");
+const modalPermissionLabelEl = document.getElementById("new-agent-permission-label");
+const modalPermissionModeEl = document.getElementById("new-agent-permission-mode");
 const backendBtns = [...document.querySelectorAll(".backend-btn")];
 
 async function fetchPersonas() {
@@ -36,6 +39,11 @@ async function fetchProviders() {
 
 async function fetchClaudeModels() {
   const res = await fetch("/api/claude-models");
+  return res.json();
+}
+
+async function fetchPermissionModes() {
+  const res = await fetch("/api/claude-permission-modes");
   return res.json();
 }
 
@@ -311,11 +319,27 @@ function populateModelSelect() {
   }
 }
 
+/** Permission policy only applies to claude-code personas - api-backend blocking is handled per-request via #2's card, not a spawn-time flag. */
+function populatePermissionModeSelect() {
+  const show = selectedBackend === "claude-code";
+  modalPermissionLabelEl.hidden = !show;
+  modalPermissionModeEl.hidden = !show;
+  if (!show) return;
+  modalPermissionModeEl.innerHTML = "";
+  for (const m of permissionModes) {
+    const opt = document.createElement("option");
+    opt.value = m.value;
+    opt.textContent = m.name;
+    modalPermissionModeEl.appendChild(opt);
+  }
+}
+
 backendBtns.forEach((btn) => {
   btn.addEventListener("click", () => {
     selectedBackend = btn.dataset.backend;
     backendBtns.forEach((b) => b.classList.toggle("active", b === btn));
     populateModelSelect();
+    populatePermissionModeSelect();
   });
 });
 
@@ -335,11 +359,13 @@ function populateWorkspaceSelect() {
 newAgentBtn.addEventListener("click", async () => {
   if (providers.length === 0) providers = await fetchProviders();
   if (claudeModels.length === 0) claudeModels = await fetchClaudeModels();
+  if (permissionModes.length === 0) permissionModes = await fetchPermissionModes();
   if (workspaces.length === 0) workspaces = await fetchWorkspaces();
   if (!defaults) defaults = await fetchDefaults();
   selectedBackend = "api";
   backendBtns.forEach((b) => b.classList.toggle("active", b.dataset.backend === "api"));
   populateModelSelect();
+  populatePermissionModeSelect();
   populateWorkspaceSelect();
   modalNameEl.value = "";
   modalEl.hidden = false;
@@ -356,6 +382,7 @@ modalCreateEl.addEventListener("click", async () => {
 
   const body = { name, backend: selectedBackend, modelID, workspaceDir };
   if (selectedBackend === "api") body.providerID = "opencode";
+  else if (modalPermissionModeEl.value) body.permissionMode = modalPermissionModeEl.value;
 
   const res = await fetch("/api/personas", {
     method: "POST",
