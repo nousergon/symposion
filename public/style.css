@@ -196,6 +196,8 @@ body {
 .blocked-btn.allow { background: #34c759; }
 .blocked-btn.deny { background: #ff453a; }
 
+.msg-cost { margin-top: 6px; font-size: 10px; color: #9a9a9e; opacity: 0.8; }
+
 .tool-parts {
   margin-top: 8px; padding-top: 6px; border-top: 1px solid #ffffff22;
   font-size: 11px;

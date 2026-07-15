@@ -172,6 +172,11 @@ function promptOpenCodeStreaming(persona, text, onDelta) {
   const orderedParts = [];
   const partIndexById = new Map();
 
+  // message.updated fires multiple times per turn as the assistant message
+  // streams (confirmed live) - just keep the latest snapshot, which is
+  // already the final/complete cost+tokens by the time session.idle fires.
+  let usage = null;
+
   return new Promise((resolve, reject) => {
     let timeout = setTimeout(onTimeout, 5 * 60 * 1000);
 
@@ -213,9 +218,22 @@ function promptOpenCodeStreaming(persona, text, onDelta) {
           if (idx !== undefined) orderedParts[idx].text += props.delta;
           onDelta?.(props.delta);
         }
+      } else if (evt.type === "message.updated" && props.info?.role === "assistant") {
+        const { cost, tokens } = props.info;
+        usage = {
+          costUsd: cost ?? 0,
+          usage: tokens
+            ? {
+                inputTokens: tokens.input ?? 0,
+                outputTokens: tokens.output ?? 0,
+                cacheReadTokens: tokens.cache?.read ?? 0,
+                cacheWriteTokens: tokens.cache?.write ?? 0,
+              }
+            : null,
+        };
       } else if (evt.type === "session.idle") {
         cleanup();
-        resolve({ text: accumulated, parts: orderedParts });
+        resolve({ text: accumulated, parts: orderedParts, ...(usage ?? { costUsd: 0, usage: null }) });
       } else if (evt.type === "session.error") {
         cleanup();
         reject(new Error(props.error?.message || "OpenCode session error"));
@@ -261,6 +279,23 @@ function ttlInfo(persona) {
   return { remainingMs, status };
 }
 
+/**
+ * Adds one turn's cost/token usage to a persona's running totals. costUsd is
+ * the pay-as-you-go-equivalent dollar value even for subscription-billed
+ * claude-code personas (confirmed live in the claude CLI's own result
+ * event) - a genuinely useful cost signal regardless of billing model.
+ */
+function accumulateUsage(persona, costUsd, usage) {
+  persona.totalCostUsd = (persona.totalCostUsd ?? 0) + (costUsd ?? 0);
+  if (!usage) return;
+  const t = persona.totalUsage ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+  t.inputTokens += usage.inputTokens ?? 0;
+  t.outputTokens += usage.outputTokens ?? 0;
+  t.cacheReadTokens += usage.cacheReadTokens ?? 0;
+  t.cacheWriteTokens += usage.cacheWriteTokens ?? 0;
+  persona.totalUsage = t;
+}
+
 function personaSummary(p) {
   const { remainingMs, status } = ttlInfo(p);
   return {
@@ -281,6 +316,8 @@ function personaSummary(p) {
     blocked: (p.lastDenials?.length ?? 0) > 0 || !!p.pendingPermission || !!p.pendingQuestion,
     pendingPermission: p.pendingPermission ?? null,
     pendingQuestion: p.pendingQuestion ?? null,
+    totalCostUsd: p.totalCostUsd ?? 0,
+    totalUsage: p.totalUsage ?? null,
   };
 }
 
@@ -510,6 +547,8 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     let replyText;
     let denials = [];
     let parts = [];
+    let costUsd = 0;
+    let usage = null;
 
     const onDelta = (chunk) => hub.publish(persona.id, { type: "delta", text: chunk });
 
@@ -517,15 +556,20 @@ app.post("/api/personas/:id/messages", async (req, res) => {
       const result = await promptOpenCodeStreaming(persona, text, onDelta);
       replyText = result.text;
       parts = result.parts;
+      costUsd = result.costUsd ?? 0;
+      usage = result.usage ?? null;
     } else {
       const result = await persona.claudeSession.sendMessage(text, onDelta);
       replyText = result.replyText;
       denials = result.permissionDenials;
       parts = result.parts;
+      costUsd = result.costUsd ?? 0;
+      usage = result.usage ?? null;
     }
 
     persona.lastActivityTs = Date.now();
     persona.lastDenials = denials;
+    accumulateUsage(persona, costUsd, usage);
     persona.messages.push({
       role: "assistant",
       text: replyText || "(no text response)",
@@ -533,11 +577,13 @@ app.post("/api/personas/:id/messages", async (req, res) => {
       blocked: denials.length > 0,
       denials,
       parts,
+      costUsd,
+      usage,
     });
     persistAll();
-    hub.publish(persona.id, { type: "done", text: replyText, denials, parts });
+    hub.publish(persona.id, { type: "done", text: replyText, denials, parts, costUsd, usage });
 
-    res.json({ persona: personaSummary(persona), reply: replyText, denials, parts });
+    res.json({ persona: personaSummary(persona), reply: replyText, denials, parts, costUsd, usage });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: String(err) });
