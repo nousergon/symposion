@@ -124,7 +124,10 @@ async function ensureConnected(persona) {
     persona.claudeSession = new ClaudeCodeSession(persona.id, persona.modelID, persona.name, persona.actualCwd, resuming, persona.permissionMode);
   } else {
     if (persona.opencodeEntry) return;
-    const entry = pool.getOrCreate(persona.workspaceDir);
+    // Reconnect to the SAME worktree/cwd used originally, same as claude-code
+    // above - actualCwd falls back to workspaceDir for personas predating
+    // isolation support.
+    const entry = pool.getOrCreate(persona.actualCwd ?? persona.workspaceDir);
     await connectApiPersona(persona, entry);
   }
 }
@@ -311,12 +314,29 @@ app.post("/api/personas", async (req, res) => {
     let persona;
     if (backend === "api") {
       if (!providerID) return res.status(400).json({ error: "providerID is required for backend=api" });
-      const entry = pool.getOrCreate(workspaceDir);
+
+      // Concurrent-session git safety (Brian's standing rule), same as the
+      // claude-code branch below: an OpenCode persona running bash/git in a
+      // shared checkout can collide with Brian's own terminal sessions or
+      // other personas on the same repo otherwise. The id passed here is
+      // just a throwaway label for worktree/branch naming - the persona's
+      // real id comes from OpenCode's own session.create() response below.
+      let actualCwd = workspaceDir;
+      let isolated = false;
+      let worktreeBranch = null;
+      if (isGitRepo(workspaceDir)) {
+        const wt = createIsolatedWorktree(workspaceDir, name, randomUUID());
+        actualCwd = wt.worktreePath;
+        isolated = true;
+        worktreeBranch = wt.branch;
+      }
+
+      const entry = pool.getOrCreate(actualCwd);
       await entry.ready;
       const session = await entry.client.session.create({ body: { title: name } });
       const id = session.data.id;
       persona = {
-        id, name, backend, providerID, modelID, workspaceDir,
+        id, name, backend, providerID, modelID, workspaceDir, actualCwd, isolated, worktreeBranch,
         sessionID: id,
         opencodeEntry: null,
         lastActivityTs: Date.now(),
@@ -395,6 +415,9 @@ app.delete("/api/personas/:id", async (req, res) => {
       await persona.opencodeEntry.client.session.delete({ path: { id: persona.sessionID } });
     } catch (err) {
       console.error(`[delete] failed to delete OpenCode session ${persona.sessionID}:`, err.message);
+    }
+    if (persona.isolated) {
+      removeWorktreeAndBranch(persona.workspaceDir, persona.actualCwd, persona.worktreeBranch);
     }
   }
 
