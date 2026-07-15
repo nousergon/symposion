@@ -117,6 +117,30 @@ body {
 }
 #new-agent-create { background: #0a84ff; }
 
+.workspace-picker-row { display: flex; gap: 6px; }
+.workspace-picker-row input { flex: 1; min-width: 0; }
+.workspace-picker-row button {
+  background: #3a3a3c; color: white; border: none; border-radius: 6px;
+  padding: 8px 12px; cursor: pointer; font-size: 12px; white-space: nowrap;
+}
+.workspace-picker-row button:hover { background: #48484a; }
+
+.modal.dir-browser { width: 440px; }
+.dir-browser-path {
+  font-size: 11px; color: #9a9a9e; font-family: monospace;
+  padding: 6px 0; word-break: break-all;
+}
+.dir-browser-list {
+  list-style: none; margin: 0; padding: 0; max-height: 280px; overflow-y: auto;
+  border: 1px solid #3a3a3c; border-radius: 6px;
+}
+.dir-browser-item {
+  padding: 8px 10px; font-size: 13px; cursor: pointer; border-bottom: 1px solid #2c2c2e;
+}
+.dir-browser-item:last-child { border-bottom: none; }
+.dir-browser-item:hover { background: #2c2c2e; }
+.dir-browser-item.dir-browser-up { color: #9a9a9e; }
+
 .backend-toggle { display: flex; gap: 6px; }
 .backend-btn {
   flex: 1; background: #2c2c2e; color: #aeaeb2; border: 1px solid #3a3a3c;

@@ -35,9 +35,11 @@
         <button type="button" class="backend-btn active" data-backend="api">API</button>
         <button type="button" class="backend-btn" data-backend="claude-code">Claude Code</button>
       </div>
-      <label>Workspace (any absolute path)</label>
-      <input id="new-agent-workspace" type="text" list="workspace-datalist" placeholder="/path/to/any/project" autocomplete="off" />
-      <datalist id="workspace-datalist"></datalist>
+      <label>Workspace</label>
+      <div class="workspace-picker-row">
+        <input id="new-agent-workspace" type="text" placeholder="/path/to/any/project" autocomplete="off" />
+        <button type="button" id="new-agent-browse-btn">Browse…</button>
+      </div>
       <label>Model</label>
       <select id="new-agent-model"></select>
       <label id="new-agent-permission-label" hidden>Permission policy</label>
@@ -45,6 +47,18 @@
       <div class="modal-actions">
         <button type="button" id="new-agent-cancel">Cancel</button>
         <button type="button" id="new-agent-create">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="dir-browser-modal" hidden>
+    <div class="modal dir-browser">
+      <h3>Choose a workspace folder</h3>
+      <div class="dir-browser-path" id="dir-browser-path"></div>
+      <ul class="dir-browser-list" id="dir-browser-list"></ul>
+      <div class="modal-actions">
+        <button type="button" id="dir-browser-cancel">Cancel</button>
+        <button type="button" id="dir-browser-select">Select this folder</button>
       </div>
     </div>
   </div>
