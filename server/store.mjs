@@ -40,6 +40,7 @@ export function toRecord(p) {
     isolated: p.isolated ?? false,
     worktreeBranch: p.worktreeBranch ?? null,
     sessionID: p.sessionID ?? p.id, // claude-code personas: sessionID === persona id
+    permissionMode: p.permissionMode ?? null, // claude-code only; null = CLI's own default (currently "auto")
     lastActivityTs: p.lastActivityTs,
     messages: p.messages,
     lastDenials: p.lastDenials ?? [],

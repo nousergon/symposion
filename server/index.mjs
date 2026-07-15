@@ -4,7 +4,7 @@ import os from "node:os";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { ClaudeCodeSession, CLAUDE_MODELS } from "./claude-code-backend.mjs";
+import { ClaudeCodeSession, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES } from "./claude-code-backend.mjs";
 import { OpenCodeServerPool } from "./opencode-pool.mjs";
 import { loadPersonas, savePersonas, toRecord } from "./store.mjs";
 import { isGitRepo, createIsolatedWorktree, removeWorktreeAndBranch } from "./worktree.mjs";
@@ -121,7 +121,7 @@ async function ensureConnected(persona) {
     // Reconnect to the SAME worktree/cwd used originally - never re-derive
     // or re-create one on reconnect, or every restart would leak a new
     // worktree+branch for the same persona.
-    persona.claudeSession = new ClaudeCodeSession(persona.id, persona.modelID, persona.name, persona.actualCwd, resuming);
+    persona.claudeSession = new ClaudeCodeSession(persona.id, persona.modelID, persona.name, persona.actualCwd, resuming, persona.permissionMode);
   } else {
     if (persona.opencodeEntry) return;
     const entry = pool.getOrCreate(persona.workspaceDir);
@@ -218,6 +218,7 @@ function personaSummary(p) {
     workspaceName: path.basename(p.workspaceDir),
     isolated: p.isolated ?? false,
     worktreeBranch: p.worktreeBranch ?? null,
+    permissionMode: p.permissionMode ?? null,
     ttlRemainingMs: remainingMs,
     ttlStatus: status,
     alive: p.backend === "claude-code" ? (p.claudeSession ? p.claudeSession.alive : true) : true,
@@ -266,6 +267,10 @@ app.get("/api/claude-models", (req, res) => {
   res.json(CLAUDE_MODELS);
 });
 
+app.get("/api/claude-permission-modes", (req, res) => {
+  res.json(CLAUDE_PERMISSION_MODES);
+});
+
 app.get("/api/defaults", (req, res) => {
   res.json({ apiDefault: API_DEFAULT, claudeCodeDefault: CLAUDE_CODE_DEFAULT, defaultWorkspace: DEFAULT_WORKSPACE });
 });
@@ -283,13 +288,16 @@ function resolveWorkspaceDir(raw) {
 
 app.post("/api/personas", async (req, res) => {
   try {
-    const { name, backend, providerID, modelID } = req.body ?? {};
+    const { name, backend, providerID, modelID, permissionMode } = req.body ?? {};
     const workspaceDir = resolveWorkspaceDir(req.body?.workspaceDir);
     if (!name) return res.status(400).json({ error: "name is required" });
     if (backend !== "api" && backend !== "claude-code") {
       return res.status(400).json({ error: 'backend must be "api" or "claude-code"' });
     }
     if (!modelID) return res.status(400).json({ error: "modelID is required" });
+    if (permissionMode && !CLAUDE_PERMISSION_MODES.some((m) => m.value === permissionMode)) {
+      return res.status(400).json({ error: `unrecognized permissionMode: ${permissionMode}` });
+    }
     if (!path.isAbsolute(workspaceDir)) {
       return res.status(400).json({ error: `workspaceDir must be an absolute path (or start with ~): ${req.body?.workspaceDir}` });
     }
@@ -335,9 +343,10 @@ app.post("/api/personas", async (req, res) => {
         worktreeBranch = wt.branch;
       }
 
-      const claudeSession = new ClaudeCodeSession(id, modelID, name, actualCwd);
+      const claudeSession = new ClaudeCodeSession(id, modelID, name, actualCwd, false, permissionMode || null);
       persona = {
         id, name, backend, modelID, workspaceDir, actualCwd, isolated, worktreeBranch,
+        permissionMode: permissionMode || null,
         claudeSession,
         lastActivityTs: Date.now(),
         messages: [],

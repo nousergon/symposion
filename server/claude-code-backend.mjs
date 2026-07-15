@@ -17,14 +17,35 @@ export const CLAUDE_MODELS = [
   { modelID: "claude-fable-5", name: "Fable 5" },
 ];
 
+// The claude CLI's own --permission-mode choices (verified via `claude
+// --help`), minus "bypassPermissions" - deliberately not offered here since
+// it disables the approval gate entirely (fully autonomous, no denials to
+// even review); picking that is a bigger decision than a persona-creation
+// dropdown should make casual. null/omitted means "let the CLI pick its own
+// default" rather than symposion hardcoding an assumption about what that
+// default is - confirmed empirically (2026-07-15, symposion#3) that it
+// currently resolves to "auto" (the mode that engages Claude Code's own
+// auto-mode allow/soft_deny/hard_deny classifier) even in a fresh,
+// unconfigured worktree - not "manual" as originally assumed when #3 was filed.
+export const CLAUDE_PERMISSION_MODES = [
+  { value: "", name: "Auto (CLI default)" },
+  { value: "acceptEdits", name: "Accept edits" },
+  { value: "manual", name: "Manual" },
+  { value: "dontAsk", name: "Don't ask" },
+  { value: "plan", name: "Plan mode" },
+];
+
 export class ClaudeCodeSession {
   /**
    * @param {boolean} resume - true when reconnecting to a persona that
    *   already existed before a server restart: uses --resume so claude-code's
    *   own on-disk session history is picked back up, instead of --session-id
    *   which would start a brand-new (empty) session under that id.
+   * @param {string|null} [permissionMode] - one of CLAUDE_PERMISSION_MODES'
+   *   values, or null/"" to omit --permission-mode entirely and let the CLI
+   *   resolve its own default.
    */
-  constructor(sessionId, model, personaName, workspaceDir, resume = false) {
+  constructor(sessionId, model, personaName, workspaceDir, resume = false, permissionMode = null) {
     this.sessionId = sessionId;
     this.model = model;
     this.alive = true;
@@ -37,6 +58,7 @@ export class ClaudeCodeSession {
     const identityPrompt = `Your name is ${personaName}. If asked your name or who you are, identify yourself as ${personaName}.`;
 
     const sessionArgs = resume ? ["--resume", sessionId] : ["--session-id", sessionId];
+    const permissionArgs = permissionMode ? ["--permission-mode", permissionMode] : [];
 
     this.proc = spawn("claude", [
       "-p",
@@ -47,6 +69,7 @@ export class ClaudeCodeSession {
       ...sessionArgs,
       "--model", model,
       "--append-system-prompt", identityPrompt,
+      ...permissionArgs,
     ], { cwd: workspaceDir, stdio: ["pipe", "pipe", "pipe"] });
 
     // Per-turn content-block-index -> type ("text" | "thinking" | ...), so we
