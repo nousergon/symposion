@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { ClaudeCodeSession, CLAUDE_MODELS } from "./claude-code-backend.mjs";
 import { OpenCodeServerPool } from "./opencode-pool.mjs";
 import { loadPersonas, savePersonas, toRecord } from "./store.mjs";
-import { isGitRepo, createIsolatedWorktree } from "./worktree.mjs";
+import { isGitRepo, createIsolatedWorktree, removeWorktreeAndBranch } from "./worktree.mjs";
 import { SseHub } from "./sse-hub.mjs";
 
 const hub = new SseHub();
@@ -285,6 +285,35 @@ app.get("/api/personas/:id/stream", (req, res) => {
   const persona = personas.get(req.params.id);
   if (!persona) return res.status(404).json({ error: "not found" });
   hub.subscribe(persona.id, res);
+});
+
+/**
+ * Full wind-down, not just a UI hide: stop the actual backend process/
+ * session so nothing keeps running or billing after deletion, and clean up
+ * every artifact this persona created (worktree, branch, OpenCode session)
+ * rather than leaving them orphaned.
+ */
+app.delete("/api/personas/:id", async (req, res) => {
+  const persona = personas.get(req.params.id);
+  if (!persona) return res.status(404).json({ error: "not found" });
+
+  if (persona.backend === "claude-code") {
+    persona.claudeSession?.kill();
+    if (persona.isolated) {
+      removeWorktreeAndBranch(persona.workspaceDir, persona.actualCwd, persona.worktreeBranch);
+    }
+  } else {
+    try {
+      await ensureConnected(persona); // opencodeEntry may be null if never reconnected since a restart
+      await persona.opencodeEntry.client.session.delete({ path: { id: persona.sessionID } });
+    } catch (err) {
+      console.error(`[delete] failed to delete OpenCode session ${persona.sessionID}:`, err.message);
+    }
+  }
+
+  personas.delete(persona.id);
+  persistAll();
+  res.status(204).end();
 });
 
 app.get("/api/personas/:id/messages", (req, res) => {

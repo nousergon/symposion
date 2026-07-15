@@ -79,10 +79,32 @@ function renderPersonaList(personas) {
         <span class="persona-model">${modelLabel(p)} · ${workspaceLabel(p)}</span>
       </span>
       <span class="ttl-label">${ttlLabel(p.ttlRemainingMs)}</span>
+      <button type="button" class="persona-delete" title="Delete agent" data-id="${p.id}">×</button>
     `;
     li.addEventListener("click", () => selectPersona(p));
+    li.querySelector(".persona-delete").addEventListener("click", (e) => {
+      e.stopPropagation();
+      deletePersona(p);
+    });
     personaListEl.appendChild(li);
   }
+}
+
+async function deletePersona(p) {
+  if (!confirm(`Delete "${p.name}"? This fully winds down its backend (kills the process, removes its worktree/branch or OpenCode session) - not reversible.`)) return;
+
+  await fetch(`/api/personas/${p.id}`, { method: "DELETE" });
+
+  if (p.id === activePersonaId) {
+    activePersonaId = null;
+    if (activeStream) { activeStream.close(); activeStream = null; }
+    chatHeaderEl.textContent = "Select or create an agent to begin";
+    chatMessagesEl.innerHTML = "";
+    chatTextEl.disabled = true;
+    chatFormEl.querySelector("button").disabled = true;
+  }
+
+  await refreshPersonas();
 }
 
 async function refreshPersonas() {

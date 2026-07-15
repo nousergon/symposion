@@ -46,10 +46,19 @@ export function createIsolatedWorktree(repoDir, personaName, personaId) {
   return { worktreePath, branch, sourceRepoDir: repoDir, sourceRepoName: repoName };
 }
 
-export function removeWorktree(repoDir, worktreePath) {
+/** Full teardown: remove the worktree, then delete its branch. Best-effort -
+ * logs and continues rather than throwing, since a delete action should
+ * still succeed at removing the persona even if git cleanup hits a snag
+ * (e.g. uncommitted changes left in the worktree). */
+export function removeWorktreeAndBranch(repoDir, worktreePath, branch) {
   try {
     execFileSync("git", ["worktree", "remove", worktreePath, "--force"], { cwd: repoDir });
   } catch (err) {
-    console.error(`[worktree] failed to remove ${worktreePath}:`, err.message);
+    console.error(`[worktree] failed to remove worktree ${worktreePath}:`, err.message);
+  }
+  try {
+    execFileSync("git", ["branch", "-D", branch], { cwd: repoDir });
+  } catch (err) {
+    console.error(`[worktree] failed to delete branch ${branch}:`, err.message);
   }
 }
