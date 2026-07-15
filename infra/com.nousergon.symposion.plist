@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nousergon.symposion</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/brianmcmahon/Development/symposion/server/index.mjs</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/brianmcmahon/Development/symposion</string>
+
+  <!-- Starts on login (RunAtLoad) and restarts unconditionally on any exit
+       (KeepAlive:true, not the SuccessfulExit-only variant) - a long-running
+       server has no legitimate "successful" exit, so any exit is a crash to
+       recover from. To actually stop it for good, use launchctl bootout, not
+       a plain kill/pkill - see infra/README.md. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/brianmcmahon/Library/Logs/symposion.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/brianmcmahon/Library/Logs/symposion.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
