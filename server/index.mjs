@@ -570,6 +570,10 @@ app.post("/api/personas/:id/question-reply", async (req, res) => {
 });
 
 const PORT = process.env.SYMPOSION_PORT || 5173;
-app.listen(PORT, () => {
+// Bind explicitly to loopback - omitting the host binds ALL interfaces by
+// default (confirmed live: `lsof -iTCP:5173` showed `TCP *:5173`), meaning
+// anyone else on the same network (e.g. an Airbnb guest on the same WiFi)
+// could reach this zero-auth server and read/send-as/delete any persona.
+app.listen(PORT, "127.0.0.1", () => {
   console.log(`symposion MVP listening on http://127.0.0.1:${PORT}`);
 });
