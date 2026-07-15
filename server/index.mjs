@@ -33,9 +33,12 @@ const DEFAULT_WORKSPACE = path.join(DEV_ROOT, "symposion");
  * Persona shape (union over both backends):
  * { id, name, backend: "api"|"claude-code", providerID?, modelID, workspaceDir,
  *   sessionID?, claudeSession?, opencodeEntry?, lastActivityTs, messages: [],
- *   lastDenials: [] }
+ *   lastDenials: [], pendingPermission?, pendingQuestion? }
  * claudeSession/opencodeEntry are null until ensureConnected() lazily
  * (re)connects them - true right after loading from disk on startup.
+ * pendingPermission/pendingQuestion (api backend only) are transient live
+ * state - never persisted, always reconciled fresh from the OpenCode server
+ * on connect (see connectApiPersona).
  */
 const personas = new Map();
 
@@ -48,9 +51,67 @@ for (const record of loadPersonas()) {
     ...record,
     claudeSession: null,
     opencodeEntry: null,
+    pendingPermission: null,
+    pendingQuestion: null,
   });
 }
 console.log(`[store] loaded ${personas.size} persona(s) from disk`);
+
+function normalizePermission(p) {
+  return { id: p.id, action: p.permission, resources: p.patterns ?? [], metadata: p.metadata };
+}
+function normalizeQuestion(q) {
+  return { id: q.id, questions: q.questions, tool: q.tool };
+}
+
+/**
+ * Wires an api-backend persona to a pool entry: subscribes to that entry's
+ * shared event feed for permission/question requests scoped to this
+ * persona's session, and reconciles any request that was ALREADY pending
+ * before this listener attached (e.g. the server restarted mid-request) via
+ * GET /permission and /question - otherwise a persona could be left
+ * permanently blocked with no way for the UI to ever learn about it.
+ *
+ * Everything here deliberately stays on the v1-generation REST surface
+ * (postSessionIdPermissionsPermissionId, /permission, /question/*) - verified
+ * empirically that the newer /api/session/{id}/permission|question endpoints
+ * are a SEPARATE registry that never sees requests created via this v1
+ * client's session.promptAsync (replies 404 PermissionNotFoundError even
+ * called within milliseconds of the request being asked). See opencode-pool.mjs.
+ */
+async function connectApiPersona(persona, entry) {
+  await entry.ready;
+  persona.opencodeEntry = entry;
+
+  const { events } = entry;
+  events.on("event", (evt) => {
+    const props = evt.properties;
+    if (!props || props.sessionID !== persona.sessionID) return;
+
+    if (evt.type === "permission.asked") {
+      persona.pendingPermission = normalizePermission(props);
+      hub.publish(persona.id, { type: "blocked", kind: "permission", request: persona.pendingPermission });
+    } else if (evt.type === "permission.replied") {
+      persona.pendingPermission = null;
+      hub.publish(persona.id, { type: "unblocked", kind: "permission" });
+    } else if (evt.type === "question.asked") {
+      persona.pendingQuestion = normalizeQuestion(props);
+      hub.publish(persona.id, { type: "blocked", kind: "question", request: persona.pendingQuestion });
+    } else if (evt.type === "question.replied" || evt.type === "question.rejected") {
+      persona.pendingQuestion = null;
+      hub.publish(persona.id, { type: "unblocked", kind: "question" });
+    }
+  });
+
+  const [permissions, questions] = await Promise.all([
+    pool.listPermissions(entry.port),
+    pool.listQuestions(entry.port),
+  ]);
+  const perm = permissions.find((p) => p.sessionID === persona.sessionID);
+  if (perm) persona.pendingPermission = normalizePermission(perm);
+  const ques = questions.find((q) => q.sessionID === persona.sessionID);
+  if (ques) persona.pendingQuestion = normalizeQuestion(ques);
+}
 
 /** Lazily (re)connect a persona's backend process/session after a restart. */
 async function ensureConnected(persona) {
@@ -64,8 +125,7 @@ async function ensureConnected(persona) {
   } else {
     if (persona.opencodeEntry) return;
     const entry = pool.getOrCreate(persona.workspaceDir);
-    await entry.ready;
-    persona.opencodeEntry = entry;
+    await connectApiPersona(persona, entry);
   }
 }
 
@@ -80,10 +140,12 @@ function promptOpenCodeStreaming(persona, text, onDelta) {
   let accumulated = "";
 
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
+    let timeout = setTimeout(onTimeout, 5 * 60 * 1000);
+
+    function onTimeout() {
       cleanup();
       reject(new Error("OpenCode turn timed out after 5 minutes"));
-    }, 5 * 60 * 1000);
+    }
 
     function onEvent(evt) {
       const props = evt.properties;
@@ -102,6 +164,12 @@ function promptOpenCodeStreaming(persona, text, onDelta) {
       } else if (evt.type === "session.error") {
         cleanup();
         reject(new Error(props.error?.message || "OpenCode session error"));
+      } else if (evt.type === "permission.asked" || evt.type === "question.asked") {
+        // The turn is now waiting on a human, not stuck - restart the guard
+        // timer from here so a permission/question prompt left open for a
+        // few minutes doesn't spuriously time out the whole turn.
+        clearTimeout(timeout);
+        timeout = setTimeout(onTimeout, 5 * 60 * 1000);
       }
     }
 
@@ -153,7 +221,9 @@ function personaSummary(p) {
     ttlRemainingMs: remainingMs,
     ttlStatus: status,
     alive: p.backend === "claude-code" ? (p.claudeSession ? p.claudeSession.alive : true) : true,
-    blocked: (p.lastDenials?.length ?? 0) > 0,
+    blocked: (p.lastDenials?.length ?? 0) > 0 || !!p.pendingPermission || !!p.pendingQuestion,
+    pendingPermission: p.pendingPermission ?? null,
+    pendingQuestion: p.pendingQuestion ?? null,
   };
 }
 
@@ -240,11 +310,14 @@ app.post("/api/personas", async (req, res) => {
       persona = {
         id, name, backend, providerID, modelID, workspaceDir,
         sessionID: id,
-        opencodeEntry: entry,
+        opencodeEntry: null,
         lastActivityTs: Date.now(),
         messages: [],
         lastDenials: [],
+        pendingPermission: null,
+        pendingQuestion: null,
       };
+      await connectApiPersona(persona, entry);
     } else {
       const id = randomUUID();
 
@@ -281,9 +354,14 @@ app.post("/api/personas", async (req, res) => {
   }
 });
 
-app.get("/api/personas/:id/stream", (req, res) => {
+app.get("/api/personas/:id/stream", async (req, res) => {
   const persona = personas.get(req.params.id);
   if (!persona) return res.status(404).json({ error: "not found" });
+  // The user is actively opening this persona - connect (and for api-backend
+  // personas, reconcile any permission/question left pending from before a
+  // server restart) now rather than staying lazy until the next message,
+  // otherwise a persona blocked before a crash shows blocked:false forever.
+  await ensureConnected(persona);
   hub.subscribe(persona.id, res);
 });
 
@@ -359,6 +437,60 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     hub.publish(persona.id, { type: "done", text: replyText, denials });
 
     res.json({ persona: personaSummary(persona), reply: replyText, denials });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+/**
+ * Resolve a pending permission request. persona.pendingPermission is cleared
+ * by the "permission.replied" event handler in connectApiPersona (single
+ * source of truth), not here - this endpoint only submits the reply.
+ */
+app.post("/api/personas/:id/permission-reply", async (req, res) => {
+  const persona = personas.get(req.params.id);
+  if (!persona) return res.status(404).json({ error: "not found" });
+  if (persona.backend !== "api") return res.status(400).json({ error: "only api-backend personas have permission requests" });
+  const { reply } = req.body ?? {};
+  if (!["once", "always", "reject"].includes(reply)) {
+    return res.status(400).json({ error: 'reply must be "once", "always", or "reject"' });
+  }
+  try {
+    // Connect (and reconcile) BEFORE checking pendingPermission - a request
+    // left pending across a server restart only shows up in memory once
+    // connectApiPersona's reconciliation has run.
+    await ensureConnected(persona);
+    if (!persona.pendingPermission) return res.status(400).json({ error: "no pending permission request" });
+    const result = await persona.opencodeEntry.client.postSessionIdPermissionsPermissionId({
+      path: { id: persona.sessionID, permissionID: persona.pendingPermission.id },
+      body: { response: reply },
+    });
+    if (result.error) throw new Error(JSON.stringify(result.error));
+    res.status(204).end();
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+/** Resolve a pending question request, either with answers or a rejection. */
+app.post("/api/personas/:id/question-reply", async (req, res) => {
+  const persona = personas.get(req.params.id);
+  if (!persona) return res.status(404).json({ error: "not found" });
+  if (persona.backend !== "api") return res.status(400).json({ error: "only api-backend personas have question requests" });
+  const { answers, reject } = req.body ?? {};
+  try {
+    await ensureConnected(persona);
+    if (!persona.pendingQuestion) return res.status(400).json({ error: "no pending question request" });
+    const { port } = persona.opencodeEntry;
+    if (reject) {
+      await pool.rejectQuestion(port, persona.pendingQuestion.id);
+    } else {
+      if (!Array.isArray(answers)) return res.status(400).json({ error: "answers array is required (or set reject:true)" });
+      await pool.replyQuestion(port, persona.pendingQuestion.id, answers);
+    }
+    res.status(204).end();
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: String(err) });

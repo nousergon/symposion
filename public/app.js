@@ -6,6 +6,7 @@ let defaults = null;
 let selectedBackend = "api";
 let activeStream = null;
 let streamingBubble = null;
+let latestPersonas = []; // last /api/personas snapshot, kept for sync lookups (e.g. the blocked card)
 
 const personaListEl = document.getElementById("persona-list");
 const chatHeaderEl = document.getElementById("chat-header");
@@ -13,6 +14,7 @@ const chatMessagesEl = document.getElementById("chat-messages");
 const chatFormEl = document.getElementById("chat-form");
 const chatTextEl = document.getElementById("chat-text");
 const newAgentBtn = document.getElementById("new-agent-btn");
+const blockedCardEl = document.getElementById("blocked-card");
 
 const modalEl = document.getElementById("new-agent-modal");
 const modalNameEl = document.getElementById("new-agent-name");
@@ -109,8 +111,128 @@ async function deletePersona(p) {
 
 async function refreshPersonas() {
   const personas = await fetchPersonas();
+  latestPersonas = personas;
   renderPersonaList(personas);
+  renderBlockedCard(personas.find((p) => p.id === activePersonaId));
   return personas;
+}
+
+/**
+ * Renders the pending permission/question request for the active persona as
+ * an actionable card, or hides it if nothing is pending. Only api-backend
+ * personas can have one - claude-code personas surface blocking via
+ * lastDenials on the message itself (no live pause, see server/index.mjs).
+ */
+function renderBlockedCard(persona) {
+  if (!persona || (!persona.pendingPermission && !persona.pendingQuestion)) {
+    blockedCardEl.hidden = true;
+    blockedCardEl.innerHTML = "";
+    return;
+  }
+
+  blockedCardEl.hidden = false;
+
+  if (persona.pendingPermission) {
+    const req = persona.pendingPermission;
+    blockedCardEl.innerHTML = `
+      <div class="blocked-card-title">⚠ Permission requested</div>
+      <div class="blocked-card-detail"><code>${escapeHtml(req.action ?? "")}</code></div>
+      ${(req.resources ?? []).map((r) => `<div class="blocked-card-resource">${escapeHtml(r)}</div>`).join("")}
+      <div class="blocked-card-actions">
+        <button type="button" data-reply="reject" class="blocked-btn deny">Deny</button>
+        <button type="button" data-reply="once" class="blocked-btn">Allow once</button>
+        <button type="button" data-reply="always" class="blocked-btn allow">Allow always</button>
+      </div>
+    `;
+    blockedCardEl.querySelectorAll("[data-reply]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        blockedCardEl.querySelectorAll("button").forEach((b) => (b.disabled = true));
+        await fetch(`/api/personas/${persona.id}/permission-reply`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reply: btn.dataset.reply }),
+        });
+        blockedCardEl.hidden = true;
+        blockedCardEl.innerHTML = "";
+        await refreshPersonas();
+      });
+    });
+    return;
+  }
+
+  const req = persona.pendingQuestion;
+  const questionBlocks = req.questions.map((q, qi) => `
+    <div class="blocked-card-question" data-qi="${qi}">
+      <div class="blocked-card-detail">${escapeHtml(q.header)}</div>
+      <div class="blocked-card-question-text">${escapeHtml(q.question)}</div>
+      <div class="blocked-card-options">
+        ${q.options.map((o, oi) => `
+          <button type="button" class="blocked-option" data-qi="${qi}" data-oi="${oi}" title="${escapeHtml(o.description)}">${escapeHtml(o.label)}</button>
+        `).join("")}
+      </div>
+      ${q.custom ? `<input type="text" class="blocked-card-custom" data-qi="${qi}" placeholder="Other..." />` : ""}
+    </div>
+  `).join("");
+
+  blockedCardEl.innerHTML = `
+    <div class="blocked-card-title">⚠ Question from agent</div>
+    ${questionBlocks}
+    <div class="blocked-card-actions">
+      <button type="button" id="blocked-question-reject" class="blocked-btn deny">Reject</button>
+      <button type="button" id="blocked-question-submit" class="blocked-btn allow">Submit</button>
+    </div>
+  `;
+
+  const selections = req.questions.map(() => new Set());
+  blockedCardEl.querySelectorAll(".blocked-option").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const qi = Number(btn.dataset.qi);
+      const multiple = req.questions[qi].multiple;
+      if (!multiple) {
+        blockedCardEl.querySelectorAll(`.blocked-option[data-qi="${qi}"]`).forEach((b) => b.classList.remove("selected"));
+        selections[qi].clear();
+      }
+      btn.classList.toggle("selected");
+      const label = req.questions[qi].options[Number(btn.dataset.oi)].label;
+      if (btn.classList.contains("selected")) selections[qi].add(label);
+      else selections[qi].delete(label);
+    });
+  });
+
+  blockedCardEl.querySelector("#blocked-question-reject").addEventListener("click", async () => {
+    blockedCardEl.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    await fetch(`/api/personas/${persona.id}/question-reply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reject: true }),
+    });
+    blockedCardEl.hidden = true;
+    blockedCardEl.innerHTML = "";
+    await refreshPersonas();
+  });
+
+  blockedCardEl.querySelector("#blocked-question-submit").addEventListener("click", async () => {
+    const answers = req.questions.map((q, qi) => {
+      const customEl = blockedCardEl.querySelector(`.blocked-card-custom[data-qi="${qi}"]`);
+      const custom = customEl?.value.trim();
+      return custom ? [custom] : [...selections[qi]];
+    });
+    blockedCardEl.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    await fetch(`/api/personas/${persona.id}/question-reply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answers }),
+    });
+    blockedCardEl.hidden = true;
+    blockedCardEl.innerHTML = "";
+    await refreshPersonas();
+  });
+}
+
+function escapeHtml(s) {
+  const div = document.createElement("div");
+  div.textContent = s ?? "";
+  return div.innerHTML;
 }
 
 function connectStream(personaId) {
@@ -132,6 +254,8 @@ function connectStream(personaId) {
         streamingBubble.classList.toggle("blocked", (evt.denials?.length ?? 0) > 0);
       }
       streamingBubble = null;
+      refreshPersonas();
+    } else if (evt.type === "blocked" || evt.type === "unblocked") {
       refreshPersonas();
     }
   };

@@ -127,3 +127,35 @@ body {
 .persona-item.blocked { border: 1px solid #ff453a55; }
 .blocked-flag { color: #ff453a; font-size: 12px; margin-right: 4px; }
 .msg.assistant.blocked { border: 1px solid #ff453a; }
+
+.blocked-card {
+  margin: 0 14px; padding: 14px; background: #2a1f1f;
+  border: 1px solid #ff453a; border-radius: 10px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.blocked-card[hidden] { display: none; }
+.blocked-card-title { font-size: 13px; font-weight: 600; color: #ff453a; }
+.blocked-card-detail { font-size: 13px; color: #eaeaea; }
+.blocked-card-detail code { background: #3a3a3c; padding: 1px 5px; border-radius: 4px; }
+.blocked-card-resource { font-size: 11px; color: #b0b0b5; font-family: monospace; padding-left: 8px; }
+.blocked-card-question-text { font-size: 13px; color: #eaeaea; margin-bottom: 4px; }
+.blocked-card-question { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; border-top: 1px solid #3a3a3c22; }
+.blocked-card-question:first-of-type { border-top: none; }
+.blocked-card-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.blocked-option {
+  background: #3a3a3c; color: #eaeaea; border: 1px solid #4a4a4c;
+  border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 12px;
+}
+.blocked-option.selected { background: #0a84ff; border-color: #0a84ff; color: white; }
+.blocked-card-custom {
+  background: #232326; border: 1px solid #3a3a3c; border-radius: 6px;
+  padding: 6px 8px; color: white; font-size: 12px; font-family: inherit;
+}
+.blocked-card-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.blocked-btn {
+  background: #3a3a3c; color: white; border: none; border-radius: 6px;
+  padding: 8px 14px; cursor: pointer; font-size: 12px;
+}
+.blocked-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.blocked-btn.allow { background: #34c759; }
+.blocked-btn.deny { background: #ff453a; }
