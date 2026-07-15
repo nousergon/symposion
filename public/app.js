@@ -7,6 +7,7 @@ let dirBrowserPath = null; // current directory shown in the workspace picker mo
 let selectedBackend = "api";
 let activeStream = null;
 let streamingBubble = null;
+let thinkingBubble = null;
 let latestPersonas = []; // last /api/personas snapshot, kept for sync lookups (e.g. the blocked card)
 
 const personaListEl = document.getElementById("persona-list");
@@ -303,13 +304,35 @@ function buildToolPartsToggle(parts) {
   return details;
 }
 
+/**
+ * Shows a "thinking" bubble immediately on send, before any real content
+ * exists to render - without it there's dead air for however long a turn
+ * spends on reasoning/tool calls before its first text delta (can be many
+ * seconds), which reads as "did this even register my message?".
+ */
+function showThinkingIndicator() {
+  clearThinkingIndicator();
+  thinkingBubble = document.createElement("div");
+  thinkingBubble.className = "msg assistant thinking";
+  thinkingBubble.innerHTML = "<span></span><span></span><span></span>";
+  chatMessagesEl.appendChild(thinkingBubble);
+  chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+}
+
+function clearThinkingIndicator() {
+  thinkingBubble?.remove();
+  thinkingBubble = null;
+}
+
 function connectStream(personaId) {
   if (activeStream) activeStream.close();
   streamingBubble = null;
+  clearThinkingIndicator();
   activeStream = new EventSource(`/api/personas/${personaId}/stream`);
   activeStream.onmessage = (e) => {
     const evt = JSON.parse(e.data);
     if (evt.type === "delta") {
+      clearThinkingIndicator();
       if (!streamingBubble) {
         streamingBubble = document.createElement("div");
         streamingBubble.className = "msg assistant";
@@ -318,6 +341,16 @@ function connectStream(personaId) {
       streamingBubble.textContent += evt.text;
       chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
     } else if (evt.type === "done") {
+      clearThinkingIndicator();
+      // A turn that only used tools (no text delta ever arrived) never
+      // created streamingBubble above - build one now so the reply still
+      // shows up immediately instead of waiting for the next poll.
+      if (!streamingBubble && (evt.text || evt.parts?.length)) {
+        streamingBubble = document.createElement("div");
+        streamingBubble.className = "msg assistant";
+        streamingBubble.textContent = evt.text || "";
+        chatMessagesEl.appendChild(streamingBubble);
+      }
       if (streamingBubble) {
         streamingBubble.classList.toggle("blocked", (evt.denials?.length ?? 0) > 0);
         const toggle = buildToolPartsToggle(evt.parts);
@@ -326,6 +359,7 @@ function connectStream(personaId) {
       streamingBubble = null;
       refreshPersonas();
     } else if (evt.type === "blocked" || evt.type === "unblocked") {
+      clearThinkingIndicator();
       refreshPersonas();
     }
   };
@@ -500,6 +534,7 @@ chatFormEl.addEventListener("submit", async (e) => {
   userDiv.textContent = text;
   chatMessagesEl.appendChild(userDiv);
   chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+  showThinkingIndicator();
 
   // The assistant reply is rendered live via the SSE stream (connectStream) -
   // this POST just kicks the turn off and waits for it to fully resolve.
