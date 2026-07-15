@@ -44,5 +44,7 @@ export function toRecord(p) {
     lastActivityTs: p.lastActivityTs,
     messages: p.messages,
     lastDenials: p.lastDenials ?? [],
+    totalCostUsd: p.totalCostUsd ?? 0,
+    totalUsage: p.totalUsage ?? null,
   };
 }

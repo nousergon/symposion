@@ -93,6 +93,18 @@ function workspaceLabel(p) {
   return p.workspaceName ?? "?";
 }
 
+/**
+ * costUsd is the pay-as-you-go-equivalent dollar value even for
+ * subscription-billed claude-code personas (the claude CLI's own result
+ * event reports it directly) - a genuinely useful cost signal regardless of
+ * billing model, not just for metered API-backend personas. null/0 (never
+ * used yet) renders nothing rather than a clutter "$0.00".
+ */
+function costLabel(costUsd) {
+  if (!costUsd) return null;
+  return costUsd < 0.01 ? `$${costUsd.toFixed(4)}` : `$${costUsd.toFixed(2)}`;
+}
+
 function renderPersonaList(personas) {
   personaListEl.innerHTML = "";
   for (const p of personas) {
@@ -102,7 +114,7 @@ function renderPersonaList(personas) {
       <span class="ttl-dot ${p.ttlStatus}" title="${p.ttlApproximate ? "Approximate - real cache window unknown for this provider" : "Confirmed 1-hour ephemeral cache window"}"></span>
       <span class="persona-name-block">
         <span class="persona-name">${p.blocked ? '<span class="blocked-flag">⚠</span>' : ""}${p.name}${p.alive ? "" : " (crashed)"}</span>
-        <span class="persona-model">${modelLabel(p)} · ${workspaceLabel(p)}</span>
+        <span class="persona-model">${modelLabel(p)} · ${workspaceLabel(p)}${costLabel(p.totalCostUsd) ? ` · ${costLabel(p.totalCostUsd)}` : ""}</span>
       </span>
       <span class="ttl-label" title="${p.ttlApproximate ? "Approximate - real cache window unknown for this provider" : "Confirmed 1-hour ephemeral cache window"}">${ttlLabel(p)}</span>
       <button type="button" class="persona-delete" title="Delete agent" data-id="${p.id}">×</button>
@@ -267,6 +279,20 @@ function escapeHtml(s) {
  * the tool entries - symposion#4's "see what a persona actually did"
  * without disturbing the default chat-only view.
  */
+/** Small per-turn cost/token caption - null if there's nothing to show (free/unmetered turn). */
+function buildCostCaption(costUsd, usage) {
+  const cost = costLabel(costUsd);
+  if (!cost && !usage) return null;
+  const caption = document.createElement("div");
+  caption.className = "msg-cost";
+  const tokenBits = usage
+    ? [`${(usage.inputTokens ?? 0).toLocaleString()} in`, `${(usage.outputTokens ?? 0).toLocaleString()} out`]
+    : [];
+  if (usage?.cacheReadTokens) tokenBits.push(`${usage.cacheReadTokens.toLocaleString()} cache read`);
+  caption.textContent = [cost, ...tokenBits].filter(Boolean).join(" · ");
+  return caption;
+}
+
 function buildToolPartsToggle(parts) {
   const toolParts = (parts ?? []).filter((p) => p.type === "tool");
   if (toolParts.length === 0) return null;
@@ -355,6 +381,8 @@ function connectStream(personaId) {
         streamingBubble.classList.toggle("blocked", (evt.denials?.length ?? 0) > 0);
         const toggle = buildToolPartsToggle(evt.parts);
         if (toggle) streamingBubble.appendChild(toggle);
+        const costCaption = buildCostCaption(evt.costUsd, evt.usage);
+        if (costCaption) streamingBubble.appendChild(costCaption);
       }
       streamingBubble = null;
       refreshPersonas();
@@ -386,6 +414,8 @@ async function loadMessages() {
     div.textContent = m.text;
     const toggle = buildToolPartsToggle(m.parts);
     if (toggle) div.appendChild(toggle);
+    const costCaption = buildCostCaption(m.costUsd, m.usage);
+    if (costCaption) div.appendChild(costCaption);
     chatMessagesEl.appendChild(div);
   }
   chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;

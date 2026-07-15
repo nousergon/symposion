@@ -213,6 +213,19 @@ export class ClaudeCodeSession {
           isError: !!evt.is_error,
           stopReason: evt.stop_reason,
           parts: this.currentParts,
+          // total_cost_usd is the pay-as-you-go-equivalent dollar value even
+          // under flat-rate subscription billing (confirmed live, symposion
+          // issue "track tokens and spend per agent") - genuinely useful as
+          // a cost signal regardless of which billing model is active.
+          costUsd: evt.total_cost_usd ?? 0,
+          usage: evt.usage
+            ? {
+                inputTokens: evt.usage.input_tokens ?? 0,
+                outputTokens: evt.usage.output_tokens ?? 0,
+                cacheReadTokens: evt.usage.cache_read_input_tokens ?? 0,
+                cacheWriteTokens: evt.usage.cache_creation_input_tokens ?? 0,
+              }
+            : null,
         });
       }
       this.currentParts = [];
