@@ -17,10 +17,14 @@ const DEV_ROOT = path.join(os.homedir(), "Development");
 
 const pool = new OpenCodeServerPool();
 
-// MVP TTL window: not the real per-provider cache-expiry number (that varies
-// by backend/provider and isn't worth pinning down yet) - just a stand-in
-// window so we can validate whether the color-tint countdown concept feels
-// right in the UI. Resets on every message, like the real thing would.
+// TTL window: confirmed empirically correct for claude-code personas -
+// subscription auth gets the real 1-hour ephemeral cache (verified via
+// usage.cache_creation.ephemeral_1h_input_tokens in spike output). For
+// api-backend (OpenCode) personas the real per-provider cache-expiry window
+// is NOT knowable through OpenCode's abstraction - this is a stand-in best
+// guess, surfaced to the UI as approximate (ttlApproximate below) rather
+// than shown with the same confidence as the confirmed claude-code number.
+// Resets on every message, like the real thing would. See symposion#5.
 const TTL_WINDOW_MS = 60 * 60 * 1000; // 60 min
 
 // Brian's chosen defaults (2026-07-14): Sonnet 5 for claude-code-backed
@@ -254,6 +258,7 @@ function personaSummary(p) {
     permissionMode: p.permissionMode ?? null,
     ttlRemainingMs: remainingMs,
     ttlStatus: status,
+    ttlApproximate: p.backend !== "claude-code",
     alive: p.backend === "claude-code" ? (p.claudeSession ? p.claudeSession.alive : true) : true,
     blocked: (p.lastDenials?.length ?? 0) > 0 || !!p.pendingPermission || !!p.pendingQuestion,
     pendingPermission: p.pendingPermission ?? null,
