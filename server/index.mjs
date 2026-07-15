@@ -7,6 +7,9 @@ import { fileURLToPath } from "node:url";
 import { ClaudeCodeSession, CLAUDE_MODELS } from "./claude-code-backend.mjs";
 import { OpenCodeServerPool } from "./opencode-pool.mjs";
 import { loadPersonas, savePersonas, toRecord } from "./store.mjs";
+import { SseHub } from "./sse-hub.mjs";
+
+const hub = new SseHub();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEV_ROOT = path.join(os.homedir(), "Development");
@@ -60,6 +63,65 @@ async function ensureConnected(persona) {
     await entry.ready;
     persona.opencodeEntry = entry;
   }
+}
+
+/**
+ * Fires an OpenCode prompt without blocking on the full response, streaming
+ * text-part deltas via onDelta as they arrive on the pool entry's shared
+ * /event feed, and resolving with the full text once the session goes idle.
+ */
+function promptOpenCodeStreaming(persona, text, onDelta) {
+  const { client, events } = persona.opencodeEntry;
+  const partTypes = new Map(); // partID -> type ("text" | "reasoning" | ...)
+  let accumulated = "";
+
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error("OpenCode turn timed out after 5 minutes"));
+    }, 5 * 60 * 1000);
+
+    function onEvent(evt) {
+      const props = evt.properties;
+      if (!props || props.sessionID !== persona.sessionID) return;
+
+      if (evt.type === "message.part.updated" && props.part?.id) {
+        partTypes.set(props.part.id, props.part.type);
+      } else if (evt.type === "message.part.delta" && props.field === "text") {
+        if (partTypes.get(props.partID) === "text") {
+          accumulated += props.delta;
+          onDelta?.(props.delta);
+        }
+      } else if (evt.type === "session.idle") {
+        cleanup();
+        resolve(accumulated);
+      } else if (evt.type === "session.error") {
+        cleanup();
+        reject(new Error(props.error?.message || "OpenCode session error"));
+      }
+    }
+
+    function cleanup() {
+      clearTimeout(timeout);
+      events.off("event", onEvent);
+    }
+
+    events.on("event", onEvent);
+
+    client.session
+      .promptAsync({
+        path: { id: persona.sessionID },
+        body: {
+          model: { providerID: persona.providerID, modelID: persona.modelID },
+          system: `Your name is ${persona.name}. If asked your name or who you are, identify yourself as ${persona.name}.`,
+          parts: [{ type: "text", text }],
+        },
+      })
+      .catch((err) => {
+        cleanup();
+        reject(err);
+      });
+  });
 }
 
 function ttlInfo(persona) {
@@ -198,6 +260,12 @@ app.post("/api/personas", async (req, res) => {
   }
 });
 
+app.get("/api/personas/:id/stream", (req, res) => {
+  const persona = personas.get(req.params.id);
+  if (!persona) return res.status(404).json({ error: "not found" });
+  hub.subscribe(persona.id, res);
+});
+
 app.get("/api/personas/:id/messages", (req, res) => {
   const persona = personas.get(req.params.id);
   if (!persona) return res.status(404).json({ error: "not found" });
@@ -218,25 +286,12 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     let replyText;
     let denials = [];
 
+    const onDelta = (chunk) => hub.publish(persona.id, { type: "delta", text: chunk });
+
     if (persona.backend === "api") {
-      const result = await persona.opencodeEntry.client.session.prompt({
-        path: { id: persona.sessionID },
-        body: {
-          model: { providerID: persona.providerID, modelID: persona.modelID },
-          // Same identity fix as the claude-code backend: the model has no
-          // idea it's "named" anything unless we actually tell it.
-          system: `Your name is ${persona.name}. If asked your name or who you are, identify yourself as ${persona.name}.`,
-          parts: [{ type: "text", text }],
-        },
-      });
-      // Chat-only view: pull out ONLY text parts, drop reasoning/tool/step
-      // parts by default - this is the "hide the code changes" behavior.
-      replyText = (result.data?.parts ?? [])
-        .filter((p) => p.type === "text")
-        .map((p) => p.text)
-        .join("\n");
+      replyText = await promptOpenCodeStreaming(persona, text, onDelta);
     } else {
-      const result = await persona.claudeSession.sendMessage(text);
+      const result = await persona.claudeSession.sendMessage(text, onDelta);
       replyText = result.replyText;
       denials = result.permissionDenials;
     }
@@ -251,6 +306,7 @@ app.post("/api/personas/:id/messages", async (req, res) => {
       denials,
     });
     persistAll();
+    hub.publish(persona.id, { type: "done", text: replyText, denials });
 
     res.json({ persona: personaSummary(persona), reply: replyText, denials });
   } catch (err) {

@@ -4,6 +4,8 @@ let claudeModels = [];
 let workspaces = [];
 let defaults = null;
 let selectedBackend = "api";
+let activeStream = null;
+let streamingBubble = null;
 
 const personaListEl = document.getElementById("persona-list");
 const chatHeaderEl = document.getElementById("chat-header");
@@ -88,11 +90,36 @@ async function refreshPersonas() {
   return personas;
 }
 
+function connectStream(personaId) {
+  if (activeStream) activeStream.close();
+  streamingBubble = null;
+  activeStream = new EventSource(`/api/personas/${personaId}/stream`);
+  activeStream.onmessage = (e) => {
+    const evt = JSON.parse(e.data);
+    if (evt.type === "delta") {
+      if (!streamingBubble) {
+        streamingBubble = document.createElement("div");
+        streamingBubble.className = "msg assistant";
+        chatMessagesEl.appendChild(streamingBubble);
+      }
+      streamingBubble.textContent += evt.text;
+      chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+    } else if (evt.type === "done") {
+      if (streamingBubble) {
+        streamingBubble.classList.toggle("blocked", (evt.denials?.length ?? 0) > 0);
+      }
+      streamingBubble = null;
+      refreshPersonas();
+    }
+  };
+}
+
 async function selectPersona(p) {
   activePersonaId = p.id;
   chatHeaderEl.textContent = `${p.name} — ${modelLabel(p)} — ${workspaceLabel(p)}`;
   chatTextEl.disabled = false;
   chatFormEl.querySelector("button").disabled = false;
+  connectStream(p.id);
   await refreshPersonas();
   await loadMessages();
 }
@@ -206,20 +233,13 @@ chatFormEl.addEventListener("submit", async (e) => {
   chatMessagesEl.appendChild(userDiv);
   chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
 
-  const res = await fetch(`/api/personas/${activePersonaId}/messages`, {
+  // The assistant reply is rendered live via the SSE stream (connectStream) -
+  // this POST just kicks the turn off and waits for it to fully resolve.
+  await fetch(`/api/personas/${activePersonaId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text }),
   });
-  const data = await res.json();
-
-  const replyDiv = document.createElement("div");
-  replyDiv.className = "msg assistant" + ((data.denials?.length ?? 0) > 0 ? " blocked" : "");
-  replyDiv.textContent = data.reply || "(no response)";
-  chatMessagesEl.appendChild(replyDiv);
-  chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
-
-  await refreshPersonas();
 });
 
 (async () => {

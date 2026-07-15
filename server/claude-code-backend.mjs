@@ -43,10 +43,16 @@ export class ClaudeCodeSession {
       "--output-format", "stream-json",
       "--input-format", "stream-json",
       "--verbose",
+      "--include-partial-messages",
       ...sessionArgs,
       "--model", model,
       "--append-system-prompt", identityPrompt,
     ], { cwd: workspaceDir, stdio: ["pipe", "pipe", "pipe"] });
+
+    // Per-turn content-block-index -> type ("text" | "thinking" | ...), so we
+    // only stream deltas for the actual visible reply, not reasoning - same
+    // chat-only-view rule as everywhere else in this app.
+    this.blockTypes = new Map();
 
     const rl = readline.createInterface({ input: this.proc.stdout });
     rl.on("line", (line) => this._handleLine(line));
@@ -73,7 +79,22 @@ export class ClaudeCodeSession {
     } catch {
       return; // non-JSON line (shouldn't happen with stream-json, but don't crash on it)
     }
+
+    if (evt.type === "stream_event") {
+      const e = evt.event;
+      if (e.type === "content_block_start") {
+        this.blockTypes.set(e.index, e.content_block?.type);
+      } else if (e.type === "content_block_delta" && e.delta?.type === "text_delta") {
+        if (this.blockTypes.get(e.index) === "text") {
+          const pending = this.queue[0];
+          if (pending?.onDelta) pending.onDelta(e.delta.text);
+        }
+      }
+      return;
+    }
+
     if (evt.type === "result") {
+      this.blockTypes.clear();
       const pending = this.queue.shift();
       if (pending) {
         pending.resolve({
@@ -86,12 +107,13 @@ export class ClaudeCodeSession {
     }
   }
 
-  sendMessage(text) {
+  /** @param {(chunk: string) => void} [onDelta] - called with each visible text chunk as it streams */
+  sendMessage(text, onDelta) {
     if (!this.alive) {
       return Promise.reject(new Error(this.crashError || "claude process is not running"));
     }
     return new Promise((resolve, reject) => {
-      this.queue.push({ resolve, reject });
+      this.queue.push({ resolve, reject, onDelta });
       const line = JSON.stringify({ type: "user", message: { role: "user", content: text } });
       this.proc.stdin.write(line + "\n");
     });

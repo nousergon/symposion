@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import path from "node:path";
+import { EventEmitter } from "node:events";
 import { fileURLToPath } from "node:url";
 import { createOpencodeClient } from "@opencode-ai/sdk";
 
@@ -45,8 +46,38 @@ export class OpenCodeServerPool {
     });
 
     const client = createOpencodeClient({ baseUrl: `http://127.0.0.1:${port}` });
-    const entry = { port, client, proc, ready };
+    const events = new EventEmitter();
+    const entry = { port, client, proc, ready, events };
     this.byDirectory.set(directory, entry);
+
+    ready.then(() => this._pumpEvents(port, events));
+
     return entry;
+  }
+
+  // One shared SSE reader per pool entry (per directory), fanning out
+  // parsed events to whoever's listening for a given sessionID - avoids
+  // opening a new /event connection per persona sharing the same directory.
+  async _pumpEvents(port, events) {
+    const res = await fetch(`http://127.0.0.1:${port}/event`);
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop(); // last (possibly partial) line stays in the buffer
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        try {
+          const evt = JSON.parse(line.slice(6));
+          events.emit("event", evt);
+        } catch {
+          // ignore malformed lines
+        }
+      }
+    }
   }
 }
