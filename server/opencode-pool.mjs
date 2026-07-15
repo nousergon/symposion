@@ -60,6 +60,21 @@ export class OpenCodeServerPool {
     });
 
     const client = createOpencodeClient({ baseUrl: `http://127.0.0.1:${port}` });
+    // The server exposes two API generations side by side (confirmed live via
+    // /doc: /session/{id}/permissions/{id} + /question/{id}/reply alongside
+    // /api/session/{id}/permission/... + /api/session/{id}/question/...).
+    // They looked interchangeable from the OpenAPI spec alone, but are NOT -
+    // verified empirically that a permission request created through this v1
+    // client's session.promptAsync only exists in the v1 registry; replying to
+    // it via the v2 (/api/...) endpoint 404s with PermissionNotFoundError even
+    // called within milliseconds of the request being asked. Since session
+    // lifecycle here goes through the v1 client exclusively, permission/
+    // question handling MUST stay on v1 too. The v1 SDK only wraps the single
+    // permission-reply method (postSessionIdPermissionsPermissionId) - it has
+    // no question support and no list endpoint for either, so list/reply/
+    // reject for questions, and list for permissions, are hand-rolled fetch
+    // calls below against the plain (non-/api) v1 REST paths, matching the
+    // pattern _pumpEvents already uses for /event.
     const events = new EventEmitter();
     const entry = { port, client, proc, ready, events };
     this.byDirectory.set(directory, entry);
@@ -71,6 +86,34 @@ export class OpenCodeServerPool {
     ready.then(() => this._pumpEvents(port, events)).catch(() => {});
 
     return entry;
+  }
+
+  /** Pending permission requests across all sessions on this server - callers filter by sessionID. */
+  async listPermissions(port) {
+    const res = await fetch(`http://127.0.0.1:${port}/permission`);
+    if (!res.ok) throw new Error(`GET /permission failed: ${res.status} ${await res.text()}`);
+    return res.json();
+  }
+
+  /** Pending question requests across all sessions on this server - callers filter by sessionID. */
+  async listQuestions(port) {
+    const res = await fetch(`http://127.0.0.1:${port}/question`);
+    if (!res.ok) throw new Error(`GET /question failed: ${res.status} ${await res.text()}`);
+    return res.json();
+  }
+
+  async replyQuestion(port, requestID, answers) {
+    const res = await fetch(`http://127.0.0.1:${port}/question/${requestID}/reply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answers }),
+    });
+    if (!res.ok) throw new Error(`POST /question/${requestID}/reply failed: ${res.status} ${await res.text()}`);
+  }
+
+  async rejectQuestion(port, requestID) {
+    const res = await fetch(`http://127.0.0.1:${port}/question/${requestID}/reject`, { method: "POST" });
+    if (!res.ok) throw new Error(`POST /question/${requestID}/reject failed: ${res.status} ${await res.text()}`);
   }
 
   // One shared SSE reader per pool entry (per directory), fanning out
