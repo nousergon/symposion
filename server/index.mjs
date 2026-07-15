@@ -145,6 +145,18 @@ async function ensureConnected(persona) {
     // worktree+branch for the same persona.
     persona.claudeSession = new ClaudeCodeSession(persona.id, persona.modelID, persona.name, persona.actualCwd, resuming, persona.permissionMode);
   } else {
+    // Runs on every call, not just first-connect: the deepseek egress
+    // proxy is a separate process from the opencode pool entry below, so it
+    // can die independently AFTER a persona is already connected (verified
+    // live, symposion#24 - a manually-killed proxy left every subsequent
+    // message to a "deepseek"-provider persona hanging forever with no
+    // error surfaced, since ensureDeepseekProxy() previously only ran once
+    // at server startup). ensureDeepseekProxy() itself is a cheap
+    // health-check-first, spawn-if-not-running call - negligible cost when
+    // the proxy's already healthy, the common case.
+    if (persona.providerID === "deepseek" && deepseekKey) {
+      await ensureDeepseekProxy(deepseekKey);
+    }
     if (persona.opencodeEntry) return;
     // Reconnect to the SAME worktree/cwd used originally, same as claude-code
     // above - actualCwd falls back to workspaceDir for personas predating
