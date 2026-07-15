@@ -152,6 +152,18 @@ body {
 .blocked-flag { color: #ff453a; font-size: 12px; margin-right: 4px; }
 .msg.assistant.blocked { border: 1px solid #ff453a; }
 
+.msg.assistant.thinking { display: flex; gap: 4px; align-items: center; padding: 14px; }
+.msg.assistant.thinking span {
+  width: 7px; height: 7px; border-radius: 50%; background: #9a9a9e;
+  animation: thinking-bounce 1.2s infinite ease-in-out;
+}
+.msg.assistant.thinking span:nth-child(2) { animation-delay: 0.15s; }
+.msg.assistant.thinking span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes thinking-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+
 .blocked-card {
   margin: 0 14px; padding: 14px; background: #2a1f1f;
   border: 1px solid #ff453a; border-radius: 10px;
