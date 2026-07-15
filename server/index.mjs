@@ -9,11 +9,27 @@ import { OpenCodeServerPool } from "./opencode-pool.mjs";
 import { loadPersonas, savePersonas, toRecord } from "./store.mjs";
 import { isGitRepo, createIsolatedWorktree, removeWorktreeAndBranch } from "./worktree.mjs";
 import { SseHub } from "./sse-hub.mjs";
+import { resolveSecret } from "./secrets.mjs";
+import { ensureDeepseekProxy } from "./deepseek-proxy.mjs";
 
 const hub = new SseHub();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEV_ROOT = path.join(os.homedir(), "Development");
+
+// Resolved once at startup (env override, else SSM /symposion/DEEPSEEK_API_KEY)
+// and handed ONLY to the local content-scanning egress proxy (deepseek-
+// proxy.mjs), never to symposion's own process.env or an `opencode serve`
+// child's env - OpenCode's "deepseek" provider config points at that local
+// proxy with a placeholder key instead, so the real key never reaches an
+// unscanned outbound request (symposion#6; see deepseek-proxy.mjs and
+// ~/Development/.llm-routing/deepseek_egress_proxy.py for why this proxy
+// exists at all). Missing key, or the proxy failing to come up, just means
+// the real-account deepseek provider silently doesn't work - not
+// startup-fatal, since the free opencode-zen proxy still works either way.
+const deepseekKey = await resolveSecret("DEEPSEEK_API_KEY");
+if (deepseekKey) await ensureDeepseekProxy(deepseekKey);
+else console.warn("[secrets] DEEPSEEK_API_KEY not found (env or SSM) - real DeepSeek account provider will not be available");
 
 const pool = new OpenCodeServerPool();
 
@@ -28,9 +44,11 @@ const pool = new OpenCodeServerPool();
 const TTL_WINDOW_MS = 60 * 60 * 1000; // 60 min
 
 // Brian's chosen defaults (2026-07-14): Sonnet 5 for claude-code-backed
-// personas, DeepSeek Flash for API-backed (OpenCode) personas.
+// personas, DeepSeek for API-backed (OpenCode) personas - the real DeepSeek
+// account (provider "deepseek"), not OpenCode Zen's free proxy (provider
+// "opencode"), now that a real key is wired up (symposion#6).
 const CLAUDE_CODE_DEFAULT = { modelID: "claude-sonnet-5" };
-const API_DEFAULT = { providerID: "opencode", modelID: "deepseek-v4-flash-free" };
+const API_DEFAULT = { providerID: "deepseek", modelID: "deepseek-chat" };
 const DEFAULT_WORKSPACE = path.join(DEV_ROOT, "symposion");
 
 /**
