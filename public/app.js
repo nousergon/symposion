@@ -63,6 +63,7 @@ function modelLabel(p) {
 }
 
 function workspaceLabel(p) {
+  if (p.isolated) return `${p.workspaceName} (worktree: ${p.worktreeBranch})`;
   return p.workspaceName ?? "?";
 }
 

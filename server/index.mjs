@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { ClaudeCodeSession, CLAUDE_MODELS } from "./claude-code-backend.mjs";
 import { OpenCodeServerPool } from "./opencode-pool.mjs";
 import { loadPersonas, savePersonas, toRecord } from "./store.mjs";
+import { isGitRepo, createIsolatedWorktree } from "./worktree.mjs";
 import { SseHub } from "./sse-hub.mjs";
 
 const hub = new SseHub();
@@ -56,7 +57,10 @@ async function ensureConnected(persona) {
   if (persona.backend === "claude-code") {
     if (persona.claudeSession && persona.claudeSession.alive) return;
     const resuming = persona.messages.length > 0;
-    persona.claudeSession = new ClaudeCodeSession(persona.id, persona.modelID, persona.name, persona.workspaceDir, resuming);
+    // Reconnect to the SAME worktree/cwd used originally - never re-derive
+    // or re-create one on reconnect, or every restart would leak a new
+    // worktree+branch for the same persona.
+    persona.claudeSession = new ClaudeCodeSession(persona.id, persona.modelID, persona.name, persona.actualCwd, resuming);
   } else {
     if (persona.opencodeEntry) return;
     const entry = pool.getOrCreate(persona.workspaceDir);
@@ -144,6 +148,8 @@ function personaSummary(p) {
     modelID: p.modelID,
     workspaceDir: p.workspaceDir,
     workspaceName: path.basename(p.workspaceDir),
+    isolated: p.isolated ?? false,
+    worktreeBranch: p.worktreeBranch ?? null,
     ttlRemainingMs: remainingMs,
     ttlStatus: status,
     alive: p.backend === "claude-code" ? (p.claudeSession ? p.claudeSession.alive : true) : true,
@@ -241,9 +247,24 @@ app.post("/api/personas", async (req, res) => {
       };
     } else {
       const id = randomUUID();
-      const claudeSession = new ClaudeCodeSession(id, modelID, name, workspaceDir);
+
+      // Concurrent-session git safety (Brian's standing rule): a claude-code
+      // persona operating in a git repo runs in a dedicated worktree, never
+      // the shared checkout directly - it could collide with Brian's own
+      // terminal sessions or other personas on the same repo otherwise.
+      let actualCwd = workspaceDir;
+      let isolated = false;
+      let worktreeBranch = null;
+      if (isGitRepo(workspaceDir)) {
+        const wt = createIsolatedWorktree(workspaceDir, name, id);
+        actualCwd = wt.worktreePath;
+        isolated = true;
+        worktreeBranch = wt.branch;
+      }
+
+      const claudeSession = new ClaudeCodeSession(id, modelID, name, actualCwd);
       persona = {
-        id, name, backend, modelID, workspaceDir,
+        id, name, backend, modelID, workspaceDir, actualCwd, isolated, worktreeBranch,
         claudeSession,
         lastActivityTs: Date.now(),
         messages: [],

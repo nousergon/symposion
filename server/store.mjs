@@ -36,6 +36,9 @@ export function toRecord(p) {
     providerID: p.providerID ?? null,
     modelID: p.modelID,
     workspaceDir: p.workspaceDir,
+    actualCwd: p.actualCwd ?? p.workspaceDir,
+    isolated: p.isolated ?? false,
+    worktreeBranch: p.worktreeBranch ?? null,
     sessionID: p.sessionID ?? p.id, // claude-code personas: sessionID === persona id
     lastActivityTs: p.lastActivityTs,
     messages: p.messages,
