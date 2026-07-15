@@ -57,9 +57,16 @@ async function fetchWorkspaces() {
   return res.json();
 }
 
-function ttlLabel(ms) {
-  const min = Math.round(ms / 60000);
-  return `${min}m`;
+/**
+ * The countdown itself is confirmed accurate for claude-code personas
+ * (real 1-hour ephemeral cache window) but is a best-guess stand-in for
+ * api-backend ones - the real per-provider cache TTL isn't observable
+ * through OpenCode's abstraction (symposion#5). The "~" marks that
+ * uncertainty rather than showing equal confidence for both.
+ */
+function ttlLabel(p) {
+  const min = Math.round(p.ttlRemainingMs / 60000);
+  return p.ttlApproximate ? `~${min}m` : `${min}m`;
 }
 
 function modelLabel(p) {
@@ -83,12 +90,12 @@ function renderPersonaList(personas) {
     const li = document.createElement("li");
     li.className = "persona-item" + (p.id === activePersonaId ? " active" : "") + (p.blocked ? " blocked" : "");
     li.innerHTML = `
-      <span class="ttl-dot ${p.ttlStatus}"></span>
+      <span class="ttl-dot ${p.ttlStatus}" title="${p.ttlApproximate ? "Approximate - real cache window unknown for this provider" : "Confirmed 1-hour ephemeral cache window"}"></span>
       <span class="persona-name-block">
         <span class="persona-name">${p.blocked ? '<span class="blocked-flag">⚠</span>' : ""}${p.name}${p.alive ? "" : " (crashed)"}</span>
         <span class="persona-model">${modelLabel(p)} · ${workspaceLabel(p)}</span>
       </span>
-      <span class="ttl-label">${ttlLabel(p.ttlRemainingMs)}</span>
+      <span class="ttl-label" title="${p.ttlApproximate ? "Approximate - real cache window unknown for this provider" : "Confirmed 1-hour ephemeral cache window"}">${ttlLabel(p)}</span>
       <button type="button" class="persona-delete" title="Delete agent" data-id="${p.id}">×</button>
     `;
     li.addEventListener("click", () => selectPersona(p));
