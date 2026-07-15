@@ -135,12 +135,20 @@ async function ensureConnected(persona) {
 /**
  * Fires an OpenCode prompt without blocking on the full response, streaming
  * text-part deltas via onDelta as they arrive on the pool entry's shared
- * /event feed, and resolving with the full text once the session goes idle.
+ * /event feed, and resolving with the full text (+ ordered tool-call parts,
+ * for the visibility toggle - symposion#4) once the session goes idle.
  */
 function promptOpenCodeStreaming(persona, text, onDelta) {
   const { client, events } = persona.opencodeEntry;
   const partTypes = new Map(); // partID -> type ("text" | "reasoning" | ...)
   let accumulated = "";
+
+  // Ordered text/tool parts for the whole turn, keyed by OpenCode's own
+  // stable part.id (confirmed empirically to stay constant across a tool
+  // call's pending->running->completed lifecycle) so text and tool entries
+  // interleave in true chronological order, not grouped by kind.
+  const orderedParts = [];
+  const partIndexById = new Map();
 
   return new Promise((resolve, reject) => {
     let timeout = setTimeout(onTimeout, 5 * 60 * 1000);
@@ -155,15 +163,37 @@ function promptOpenCodeStreaming(persona, text, onDelta) {
       if (!props || props.sessionID !== persona.sessionID) return;
 
       if (evt.type === "message.part.updated" && props.part?.id) {
-        partTypes.set(props.part.id, props.part.type);
+        const { id, type } = props.part;
+        partTypes.set(id, type);
+        if (type === "text" && !partIndexById.has(id)) {
+          partIndexById.set(id, orderedParts.length);
+          orderedParts.push({ type: "text", text: "" });
+        } else if (type === "tool") {
+          const toolPart = {
+            type: "tool",
+            name: props.part.tool,
+            input: props.part.state?.input ?? {},
+            output: props.part.state?.output ?? null,
+            isError: props.part.state?.status === "error",
+          };
+          if (partIndexById.has(id)) {
+            orderedParts[partIndexById.get(id)] = toolPart;
+          } else {
+            partIndexById.set(id, orderedParts.length);
+            orderedParts.push(toolPart);
+          }
+        }
+        // "reasoning"/"step-start"/"step-finish" intentionally skipped - chat-only view.
       } else if (evt.type === "message.part.delta" && props.field === "text") {
         if (partTypes.get(props.partID) === "text") {
           accumulated += props.delta;
+          const idx = partIndexById.get(props.partID);
+          if (idx !== undefined) orderedParts[idx].text += props.delta;
           onDelta?.(props.delta);
         }
       } else if (evt.type === "session.idle") {
         cleanup();
-        resolve(accumulated);
+        resolve({ text: accumulated, parts: orderedParts });
       } else if (evt.type === "session.error") {
         cleanup();
         reject(new Error(props.error?.message || "OpenCode session error"));
@@ -445,15 +475,19 @@ app.post("/api/personas/:id/messages", async (req, res) => {
 
     let replyText;
     let denials = [];
+    let parts = [];
 
     const onDelta = (chunk) => hub.publish(persona.id, { type: "delta", text: chunk });
 
     if (persona.backend === "api") {
-      replyText = await promptOpenCodeStreaming(persona, text, onDelta);
+      const result = await promptOpenCodeStreaming(persona, text, onDelta);
+      replyText = result.text;
+      parts = result.parts;
     } else {
       const result = await persona.claudeSession.sendMessage(text, onDelta);
       replyText = result.replyText;
       denials = result.permissionDenials;
+      parts = result.parts;
     }
 
     persona.lastActivityTs = Date.now();
@@ -464,11 +498,12 @@ app.post("/api/personas/:id/messages", async (req, res) => {
       ts: Date.now(),
       blocked: denials.length > 0,
       denials,
+      parts,
     });
     persistAll();
-    hub.publish(persona.id, { type: "done", text: replyText, denials });
+    hub.publish(persona.id, { type: "done", text: replyText, denials, parts });
 
-    res.json({ persona: personaSummary(persona), reply: replyText, denials });
+    res.json({ persona: personaSummary(persona), reply: replyText, denials, parts });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: String(err) });

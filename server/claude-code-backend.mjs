@@ -77,6 +77,15 @@ export class ClaudeCodeSession {
     // chat-only-view rule as everywhere else in this app.
     this.blockTypes = new Map();
 
+    // Ordered text/tool_use/tool_result parts for the CURRENT turn, built
+    // from the full (non-streaming) "assistant"/"user" events rather than
+    // the stream_event deltas above - those events already carry complete
+    // blocks (text, tool_use with name+input, tool_result with output),
+    // simpler than reassembling one from delta fragments. This is what the
+    // tool-call visibility toggle (symposion#4) renders; unrelated to the
+    // live char-by-char streaming, which stays exactly as it was.
+    this.currentParts = [];
+
     const rl = readline.createInterface({ input: this.proc.stdout });
     rl.on("line", (line) => this._handleLine(line));
 
@@ -116,6 +125,35 @@ export class ClaudeCodeSession {
       return;
     }
 
+    if (evt.type === "assistant") {
+      for (const block of evt.message?.content ?? []) {
+        if (block.type === "text") {
+          this.currentParts.push({ type: "text", text: block.text });
+        } else if (block.type === "tool_use") {
+          this.currentParts.push({ type: "tool", name: block.name, input: block.input, toolUseId: block.id, output: null, isError: null });
+        }
+        // "thinking" blocks intentionally skipped - chat-only view.
+      }
+      return;
+    }
+
+    if (evt.type === "user") {
+      for (const block of evt.message?.content ?? []) {
+        if (block.type !== "tool_result") continue;
+        // Search from the end - a toolUseId is unique per call, but scanning
+        // backward finds the most recent (only) match faster in the common case.
+        for (let i = this.currentParts.length - 1; i >= 0; i--) {
+          const part = this.currentParts[i];
+          if (part.type === "tool" && part.toolUseId === block.tool_use_id) {
+            part.output = typeof block.content === "string" ? block.content : JSON.stringify(block.content);
+            part.isError = !!block.is_error;
+            break;
+          }
+        }
+      }
+      return;
+    }
+
     if (evt.type === "result") {
       this.blockTypes.clear();
       const pending = this.queue.shift();
@@ -125,8 +163,10 @@ export class ClaudeCodeSession {
           permissionDenials: evt.permission_denials ?? [],
           isError: !!evt.is_error,
           stopReason: evt.stop_reason,
+          parts: this.currentParts,
         });
       }
+      this.currentParts = [];
     }
   }
 

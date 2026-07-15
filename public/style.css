@@ -159,3 +159,23 @@ body {
 .blocked-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .blocked-btn.allow { background: #34c759; }
 .blocked-btn.deny { background: #ff453a; }
+
+.tool-parts {
+  margin-top: 8px; padding-top: 6px; border-top: 1px solid #ffffff22;
+  font-size: 11px;
+}
+.tool-parts summary { cursor: pointer; color: #9a9a9e; }
+.tool-parts summary:hover { color: #eaeaea; }
+.tool-part-entry {
+  margin-top: 6px; padding: 6px 8px; background: #00000022; border-radius: 6px;
+  border-left: 2px solid #6a6a6e;
+}
+.tool-part-entry.error { border-left-color: #ff453a; }
+.tool-part-name { font-weight: 600; color: #eaeaea; margin-bottom: 4px; }
+.tool-part-input, .tool-part-output {
+  margin: 4px 0 0 0; white-space: pre-wrap; word-break: break-word;
+  font-size: 10px; color: #b0b0b5; font-family: monospace;
+  max-height: 200px; overflow-y: auto;
+}
+.tool-part-output { color: #9a9a9e; border-top: 1px dashed #3a3a3c; padding-top: 4px; }
+.tool-part-entry.error .tool-part-output { color: #ff9b96; }
