@@ -288,14 +288,25 @@ const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "..", "public")));
 
-app.get("/api/workspaces", (req, res) => {
+/**
+ * Lists subdirectories of ?path= (any absolute path, ~ expanded via
+ * resolveWorkspaceDir - falls back to DEFAULT_WORKSPACE if omitted, or to
+ * the home directory if the requested path doesn't exist/isn't a directory,
+ * e.g. the user typed a partial path before clicking Browse). Backs the
+ * workspace directory-navigator modal - not scoped to ~/Development, any
+ * folder on the filesystem is reachable by navigating up/down from here.
+ */
+app.get("/api/browse-dir", (req, res) => {
+  let dir = req.query.path ? resolveWorkspaceDir(String(req.query.path)) : DEFAULT_WORKSPACE;
+  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) dir = os.homedir();
   try {
     const entries = fs
-      .readdirSync(DEV_ROOT, { withFileTypes: true })
+      .readdirSync(dir, { withFileTypes: true })
       .filter((e) => e.isDirectory() && !e.name.startsWith("."))
-      .map((e) => ({ name: e.name, path: path.join(DEV_ROOT, e.name) }))
+      .map((e) => ({ name: e.name, path: path.join(dir, e.name) }))
       .sort((a, b) => a.name.localeCompare(b.name));
-    res.json(entries);
+    const parent = path.dirname(dir);
+    res.json({ path: dir, parent: parent === dir ? null : parent, entries });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: String(err) });

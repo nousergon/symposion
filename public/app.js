@@ -2,8 +2,8 @@ let activePersonaId = null;
 let providers = [];
 let claudeModels = [];
 let permissionModes = [];
-let workspaces = [];
 let defaults = null;
+let dirBrowserPath = null; // current directory shown in the workspace picker modal
 let selectedBackend = "api";
 let activeStream = null;
 let streamingBubble = null;
@@ -26,6 +26,13 @@ const modalWorkspaceEl = document.getElementById("new-agent-workspace");
 const modalPermissionLabelEl = document.getElementById("new-agent-permission-label");
 const modalPermissionModeEl = document.getElementById("new-agent-permission-mode");
 const backendBtns = [...document.querySelectorAll(".backend-btn")];
+
+const browseBtn = document.getElementById("new-agent-browse-btn");
+const dirBrowserModalEl = document.getElementById("dir-browser-modal");
+const dirBrowserPathEl = document.getElementById("dir-browser-path");
+const dirBrowserListEl = document.getElementById("dir-browser-list");
+const dirBrowserCancelEl = document.getElementById("dir-browser-cancel");
+const dirBrowserSelectEl = document.getElementById("dir-browser-select");
 
 async function fetchPersonas() {
   const res = await fetch("/api/personas");
@@ -52,8 +59,9 @@ async function fetchDefaults() {
   return res.json();
 }
 
-async function fetchWorkspaces() {
-  const res = await fetch("/api/workspaces");
+async function fetchBrowseDir(dirPath) {
+  const url = dirPath ? `/api/browse-dir?path=${encodeURIComponent(dirPath)}` : "/api/browse-dir";
+  const res = await fetch(url);
   return res.json();
 }
 
@@ -399,30 +407,60 @@ backendBtns.forEach((btn) => {
   });
 });
 
-function populateWorkspaceSelect() {
-  const datalist = document.getElementById("workspace-datalist");
-  datalist.innerHTML = "";
-  // Suggestions only, not a restriction - the input accepts any absolute path.
-  for (const w of workspaces) {
-    const opt = document.createElement("option");
-    opt.value = w.path;
-    opt.label = w.name;
-    datalist.appendChild(opt);
+/**
+ * Renders the directory-navigator modal for `dirPath` (any absolute path -
+ * not scoped to ~/Development, unlike the old datalist-of-suggestions this
+ * replaced). ".." navigates to the parent unless already at the filesystem
+ * root; clicking a folder row navigates into it. "Select this folder"
+ * writes the current path into the workspace text input and closes the
+ * modal - the text input itself is left editable too, for anyone who'd
+ * rather just paste/type a path directly.
+ */
+async function renderDirBrowser(dirPath) {
+  const data = await fetchBrowseDir(dirPath);
+  dirBrowserPath = data.path;
+  dirBrowserPathEl.textContent = data.path;
+  dirBrowserListEl.innerHTML = "";
+
+  if (data.parent) {
+    const up = document.createElement("li");
+    up.className = "dir-browser-item dir-browser-up";
+    up.textContent = ".. (up)";
+    up.addEventListener("click", () => renderDirBrowser(data.parent));
+    dirBrowserListEl.appendChild(up);
   }
-  if (defaults?.defaultWorkspace) modalWorkspaceEl.value = defaults.defaultWorkspace;
+
+  for (const entry of data.entries) {
+    const li = document.createElement("li");
+    li.className = "dir-browser-item";
+    li.textContent = entry.name;
+    li.addEventListener("click", () => renderDirBrowser(entry.path));
+    dirBrowserListEl.appendChild(li);
+  }
 }
+
+browseBtn.addEventListener("click", () => {
+  dirBrowserModalEl.hidden = false;
+  renderDirBrowser(modalWorkspaceEl.value || dirBrowserPath);
+});
+
+dirBrowserCancelEl.addEventListener("click", () => { dirBrowserModalEl.hidden = true; });
+
+dirBrowserSelectEl.addEventListener("click", () => {
+  modalWorkspaceEl.value = dirBrowserPath;
+  dirBrowserModalEl.hidden = true;
+});
 
 newAgentBtn.addEventListener("click", async () => {
   if (providers.length === 0) providers = await fetchProviders();
   if (claudeModels.length === 0) claudeModels = await fetchClaudeModels();
   if (permissionModes.length === 0) permissionModes = await fetchPermissionModes();
-  if (workspaces.length === 0) workspaces = await fetchWorkspaces();
   if (!defaults) defaults = await fetchDefaults();
   selectedBackend = "api";
   backendBtns.forEach((b) => b.classList.toggle("active", b.dataset.backend === "api"));
   populateModelSelect();
   populatePermissionModeSelect();
-  populateWorkspaceSelect();
+  modalWorkspaceEl.value = defaults?.defaultWorkspace ?? "";
   modalNameEl.value = "";
   modalEl.hidden = false;
   modalNameEl.focus();
