@@ -243,6 +243,51 @@ function escapeHtml(s) {
   return div.innerHTML;
 }
 
+/**
+ * Builds a collapsed-by-default <details> disclosure listing the tool calls
+ * (name, input, output) from a message's ordered `parts` - null if there
+ * were none, so callers can skip appending anything. Text parts are already
+ * shown as the message's own text (streamed live), so this only surfaces
+ * the tool entries - symposion#4's "see what a persona actually did"
+ * without disturbing the default chat-only view.
+ */
+function buildToolPartsToggle(parts) {
+  const toolParts = (parts ?? []).filter((p) => p.type === "tool");
+  if (toolParts.length === 0) return null;
+
+  const details = document.createElement("details");
+  details.className = "tool-parts";
+  const summary = document.createElement("summary");
+  summary.textContent = `${toolParts.length} tool call${toolParts.length === 1 ? "" : "s"}`;
+  details.appendChild(summary);
+
+  for (const t of toolParts) {
+    const entry = document.createElement("div");
+    entry.className = "tool-part-entry" + (t.isError ? " error" : "");
+
+    const nameEl = document.createElement("div");
+    nameEl.className = "tool-part-name";
+    nameEl.textContent = t.name ?? "tool";
+    entry.appendChild(nameEl);
+
+    const inputEl = document.createElement("pre");
+    inputEl.className = "tool-part-input";
+    inputEl.textContent = JSON.stringify(t.input ?? {}, null, 2);
+    entry.appendChild(inputEl);
+
+    if (t.output != null) {
+      const outputEl = document.createElement("pre");
+      outputEl.className = "tool-part-output";
+      outputEl.textContent = typeof t.output === "string" ? t.output : JSON.stringify(t.output, null, 2);
+      entry.appendChild(outputEl);
+    }
+
+    details.appendChild(entry);
+  }
+
+  return details;
+}
+
 function connectStream(personaId) {
   if (activeStream) activeStream.close();
   streamingBubble = null;
@@ -260,6 +305,8 @@ function connectStream(personaId) {
     } else if (evt.type === "done") {
       if (streamingBubble) {
         streamingBubble.classList.toggle("blocked", (evt.denials?.length ?? 0) > 0);
+        const toggle = buildToolPartsToggle(evt.parts);
+        if (toggle) streamingBubble.appendChild(toggle);
       }
       streamingBubble = null;
       refreshPersonas();
@@ -288,6 +335,8 @@ async function loadMessages() {
     const div = document.createElement("div");
     div.className = `msg ${m.role}` + (m.blocked ? " blocked" : "");
     div.textContent = m.text;
+    const toggle = buildToolPartsToggle(m.parts);
+    if (toggle) div.appendChild(toggle);
     chatMessagesEl.appendChild(div);
   }
   chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
