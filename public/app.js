@@ -278,11 +278,56 @@ function escapeHtml(s) {
   return div.innerHTML;
 }
 
-/** Adds newly picked/dropped files to the staged list and re-renders the chip row. */
+/**
+ * Extensions browsers do NOT have a registered MIME type for, so `file.type`
+ * comes back as "" for every one of them (confirmed: Chrome/Safari report
+ * empty string for .py/.ts/.go/.yaml/etc, unlike images/PDF which they sniff
+ * correctly from file headers) - exactly the code/text files this feature
+ * exists for. Forcing these to "text/plain" is what makes the server's
+ * isTextMime() (claude-code-backend.mjs) correctly route them to a text
+ * document block instead of an opaque, wrong-media-type base64 blob.
+ */
+const TEXT_EXTENSIONS = new Set([
+  ".txt", ".md", ".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".json", ".yaml", ".yml", ".toml",
+  ".xml", ".html", ".htm", ".css", ".scss", ".sh", ".bash", ".zsh", ".rb", ".go", ".rs", ".java", ".c",
+  ".h", ".cpp", ".hpp", ".cs", ".php", ".sql", ".csv", ".log", ".ini", ".cfg", ".conf", ".env", ".rst",
+  ".swift", ".kt", ".scala", ".lua", ".r", ".pl", ".vue", ".svelte", ".gitignore", ".editorconfig",
+]);
+
+function resolveMime(file) {
+  const dot = file.name.lastIndexOf(".");
+  const ext = dot >= 0 ? file.name.slice(dot).toLowerCase() : "";
+  const base = file.name.toLowerCase();
+  if (TEXT_EXTENSIONS.has(ext) || base === "dockerfile" || base === "makefile") return "text/plain";
+  return file.type || "application/octet-stream";
+}
+
+// The server accepts a 25mb JSON body total (index.mjs's express.json limit).
+// Base64 inflates raw bytes by ~4/3, so the total RAW staged size must stay
+// well under that once every file is encoded - 17mb raw comes to ~23mb of
+// base64 + JSON overhead, safely inside the ceiling. Checked client-side so
+// staging returns an immediate, specific rejection instead of a same-looking
+// generic failure once the POST hits the server's 413.
+const MAX_SINGLE_FILE_BYTES = 15 * 1024 * 1024;
+const MAX_TOTAL_STAGED_BYTES = 17 * 1024 * 1024;
+
+/** Adds newly picked/dropped files to the staged list and re-renders the chip row - skips (with a message) anything that would blow the upload size ceiling. */
 function addFilesToStaged(fileList) {
+  let totalBytes = stagedAttachments.reduce((sum, a) => sum + a.file.size, 0);
+  const rejected = [];
   for (const file of fileList) {
+    if (file.size > MAX_SINGLE_FILE_BYTES) {
+      rejected.push(`${file.name} (${formatBytes(file.size)} exceeds the ${formatBytes(MAX_SINGLE_FILE_BYTES)} per-file limit)`);
+      continue;
+    }
+    if (totalBytes + file.size > MAX_TOTAL_STAGED_BYTES) {
+      rejected.push(`${file.name} (would exceed the ${formatBytes(MAX_TOTAL_STAGED_BYTES)} combined limit for one message)`);
+      continue;
+    }
+    totalBytes += file.size;
     stagedAttachments.push({ file, localId: `${Date.now()}-${Math.random().toString(36).slice(2)}` });
   }
+  if (rejected.length) alert(`Not attached:\n${rejected.join("\n")}`);
   renderStagedAttachments();
 }
 
@@ -786,13 +831,13 @@ chatFormEl.addEventListener("submit", async (e) => {
   chatTextEl.value = "";
 
   const attachments = await Promise.all(
-    stagedAttachments.map(async ({ file }) => ({ filename: file.name, mime: file.type || "application/octet-stream", base64: await fileToBase64(file) }))
+    stagedAttachments.map(async ({ file }) => ({ filename: file.name, mime: resolveMime(file), base64: await fileToBase64(file) }))
   );
   // Metadata-only shape for the optimistic local render - the real ids come
   // back once the server persists them, but the local bubble doesn't need to
   // wait for that round trip since it renders straight from the File objects
   // via a throwaway object URL rather than the /attachments/:id route.
-  const stagedForRender = stagedAttachments.map(({ file }) => ({ filename: file.name, mime: file.type, _localUrl: URL.createObjectURL(file) }));
+  const stagedForRender = stagedAttachments.map(({ file }) => ({ filename: file.name, mime: resolveMime(file), _localUrl: URL.createObjectURL(file) }));
   stagedAttachments = [];
   renderStagedAttachments();
 
@@ -805,6 +850,11 @@ chatFormEl.addEventListener("submit", async (e) => {
     if (a.mime?.startsWith("image/")) {
       const img = document.createElement("img");
       img.className = "msg-attachment-thumb";
+      // Revoke once decoded - the object URL only needs to live long enough
+      // for the browser to load/decode the bitmap once; holding it open for
+      // the rest of the session leaks the underlying Blob for every
+      // image ever attached.
+      img.addEventListener("load", () => URL.revokeObjectURL(a._localUrl), { once: true });
       img.src = a._localUrl;
       img.alt = a.filename;
       row.appendChild(img);
