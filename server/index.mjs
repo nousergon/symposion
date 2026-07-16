@@ -601,7 +601,16 @@ app.post("/api/personas/:id/messages", async (req, res) => {
   // the UI re-fetch the bytes later via GET .../attachments/:id - keeping
   // the whole-file JSON store from ballooning with inlined file data.
   const attachments = rawAttachments ?? [];
-  const attachmentMetas = attachments.map((a) => saveAttachment(persona.id, a));
+  let attachmentMetas;
+  try {
+    // Isolated from the turn's own try/catch below so a malformed upload
+    // (bad base64, missing fields) fails BEFORE anything is pushed onto
+    // persona.messages - otherwise a bad request would leave a half-formed
+    // user turn in history with no attachments and no way to retry cleanly.
+    attachmentMetas = attachments.map((a) => saveAttachment(persona.id, a));
+  } catch (err) {
+    return res.status(400).json({ error: `invalid attachment: ${err.message}` });
+  }
 
   persona.messages.push({ role: "user", text, ts: Date.now(), attachments: attachmentMetas });
 
