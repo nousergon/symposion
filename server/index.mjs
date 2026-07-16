@@ -438,6 +438,21 @@ app.get("/api/defaults", (req, res) => {
   res.json({ apiDefault: API_DEFAULT, claudeCodeDefault: CLAUDE_CODE_DEFAULT, defaultWorkspace: DEFAULT_WORKSPACE });
 });
 
+/**
+ * Restarts the server process in place, so a UI button can pick up a fresh
+ * `git pull` without needing Activity Monitor / launchctl. Relies entirely
+ * on the LaunchAgent's KeepAlive:true (com.nousergon.symposion.plist) to
+ * respawn - same "any exit is a crash to recover from" contract the
+ * documented `launchctl kickstart -k` / kill / pkill restart paths already
+ * rely on (see infra/README.md), so this introduces no new failure mode.
+ * Responds before exiting so the fetch resolves; the frontend then polls
+ * /api/defaults until the fresh process answers and reloads the page.
+ */
+app.post("/api/server/restart", (req, res) => {
+  res.json({ ok: true });
+  setTimeout(() => process.exit(0), 150);
+});
+
 app.get("/api/personas", (req, res) => {
   res.json([...personas.values()].map(personaSummary));
 });
