@@ -394,6 +394,12 @@ function connectStream(personaId) {
 }
 
 async function selectPersona(p) {
+  // Re-clicking the already-active persona is a no-op: connectStream() would
+  // otherwise tear down and re-open the live SSE subscription, and
+  // loadMessages() would wipe/rebuild the chat panel, for a view that hasn't
+  // actually changed - pure churn with a chance of visible flicker on a turn
+  // that's still streaming.
+  if (p.id === activePersonaId) return;
   activePersonaId = p.id;
   chatHeaderEl.textContent = `${p.name} — ${modelLabel(p)} — ${workspaceLabel(p)}`;
   chatTextEl.disabled = false;
@@ -403,20 +409,32 @@ async function selectPersona(p) {
   await loadMessages();
 }
 
+/**
+ * Loads the full message history AND re-seeds `streamingBubble` from a
+ * trailing pending:true entry (see GET .../messages) if the turn currently
+ * in view is still generating - this is what makes switching personas mid-
+ * turn, reloading the page, or simply re-selecting a persona later, pick up
+ * the response exactly where it stands server-side instead of showing
+ * nothing (or a truncated fragment) until it completes.
+ */
 async function loadMessages() {
   if (!activePersonaId) return;
   const res = await fetch(`/api/personas/${activePersonaId}/messages`);
   const messages = await res.json();
   chatMessagesEl.innerHTML = "";
+  streamingBubble = null;
   for (const m of messages) {
     const div = document.createElement("div");
     div.className = `msg ${m.role}` + (m.blocked ? " blocked" : "");
     div.textContent = m.text;
-    const toggle = buildToolPartsToggle(m.parts);
-    if (toggle) div.appendChild(toggle);
-    const costCaption = buildCostCaption(m.costUsd, m.usage);
-    if (costCaption) div.appendChild(costCaption);
+    if (!m.pending) {
+      const toggle = buildToolPartsToggle(m.parts);
+      if (toggle) div.appendChild(toggle);
+      const costCaption = buildCostCaption(m.costUsd, m.usage);
+      if (costCaption) div.appendChild(costCaption);
+    }
     chatMessagesEl.appendChild(div);
+    if (m.pending) streamingBubble = div;
   }
   chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
 }
