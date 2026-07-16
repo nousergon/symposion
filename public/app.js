@@ -9,12 +9,16 @@ let activeStream = null;
 let streamingBubble = null;
 let thinkingBubble = null;
 let latestPersonas = []; // last /api/personas snapshot, kept for sync lookups (e.g. the blocked card)
+let stagedAttachments = []; // [{ file: File, localId }] - staged for the NEXT send, cleared after submit
 
 const personaListEl = document.getElementById("persona-list");
 const chatHeaderEl = document.getElementById("chat-header");
 const chatMessagesEl = document.getElementById("chat-messages");
 const chatFormEl = document.getElementById("chat-form");
 const chatTextEl = document.getElementById("chat-text");
+const chatFileInputEl = document.getElementById("chat-file-input");
+const chatAttachBtnEl = document.getElementById("chat-attach-btn");
+const stagedAttachmentsEl = document.getElementById("staged-attachments");
 const newAgentBtn = document.getElementById("new-agent-btn");
 const blockedCardEl = document.getElementById("blocked-card");
 
@@ -139,7 +143,10 @@ async function deletePersona(p) {
     chatHeaderEl.textContent = "Select or create an agent to begin";
     chatMessagesEl.innerHTML = "";
     chatTextEl.disabled = true;
-    chatFormEl.querySelector("button").disabled = true;
+    chatAttachBtnEl.disabled = true;
+    document.getElementById("chat-send-btn").disabled = true;
+    stagedAttachments = [];
+    renderStagedAttachments();
   }
 
   await refreshPersonas();
@@ -269,6 +276,81 @@ function escapeHtml(s) {
   const div = document.createElement("div");
   div.textContent = s ?? "";
   return div.innerHTML;
+}
+
+/** Adds newly picked/dropped files to the staged list and re-renders the chip row. */
+function addFilesToStaged(fileList) {
+  for (const file of fileList) {
+    stagedAttachments.push({ file, localId: `${Date.now()}-${Math.random().toString(36).slice(2)}` });
+  }
+  renderStagedAttachments();
+}
+
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Chip row above the text input showing files staged for the NEXT send, each removable before it goes out. */
+function renderStagedAttachments() {
+  stagedAttachmentsEl.innerHTML = "";
+  stagedAttachmentsEl.hidden = stagedAttachments.length === 0;
+  for (const { file, localId } of stagedAttachments) {
+    const chip = document.createElement("span");
+    chip.className = "attachment-chip";
+    chip.innerHTML = `<span class="attachment-chip-name">${escapeHtml(file.name)}</span><span class="attachment-chip-size">${formatBytes(file.size)}</span><button type="button" class="attachment-chip-remove" title="Remove">×</button>`;
+    chip.querySelector(".attachment-chip-remove").addEventListener("click", () => {
+      stagedAttachments = stagedAttachments.filter((a) => a.localId !== localId);
+      renderStagedAttachments();
+    });
+    stagedAttachmentsEl.appendChild(chip);
+  }
+}
+
+/** Reads a File as base64 (no `data:...;base64,` prefix - the server expects the raw payload). */
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.slice(reader.result.indexOf(",") + 1));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Appends a chip per attachment to a message bubble - an <img> thumbnail for
+ * image/* mimes (fetched from the server-side GET .../attachments/:id route,
+ * never inlined base64 in the polled /messages payload), otherwise a small
+ * downloadable file chip. Used both for the optimistic user-message render
+ * and for history replay in loadMessages().
+ */
+function renderAttachments(bubble, attachments, personaId) {
+  if (!attachments?.length) return;
+  const row = document.createElement("div");
+  row.className = "msg-attachments";
+  for (const a of attachments) {
+    const url = `/api/personas/${personaId}/attachments/${a.id}`;
+    if (a.mime?.startsWith("image/")) {
+      const link = document.createElement("a");
+      link.href = url;
+      link.target = "_blank";
+      const img = document.createElement("img");
+      img.className = "msg-attachment-thumb";
+      img.src = url;
+      img.alt = a.filename ?? "";
+      link.appendChild(img);
+      row.appendChild(link);
+    } else {
+      const link = document.createElement("a");
+      link.href = url;
+      link.target = "_blank";
+      link.className = "msg-attachment-file";
+      link.textContent = `📄 ${a.filename ?? "file"}`;
+      row.appendChild(link);
+    }
+  }
+  bubble.appendChild(row);
 }
 
 /**
@@ -498,7 +580,10 @@ async function selectPersona(p) {
   activePersonaId = p.id;
   chatHeaderEl.textContent = `${p.name} — ${modelLabel(p)} — ${workspaceLabel(p)}`;
   chatTextEl.disabled = false;
-  chatFormEl.querySelector("button").disabled = false;
+  chatAttachBtnEl.disabled = false;
+  document.getElementById("chat-send-btn").disabled = false;
+  stagedAttachments = [];
+  renderStagedAttachments();
   connectStream(p.id);
   await refreshPersonas();
   await loadMessages();
@@ -522,6 +607,7 @@ async function loadMessages() {
     const div = document.createElement("div");
     div.className = `msg ${m.role}` + (m.blocked ? " blocked" : "");
     ensureMsgTextEl(div).textContent = m.text;
+    renderAttachments(div, m.attachments, activePersonaId);
     if (!m.pending) {
       const toggle = buildToolPartsToggle(m.parts);
       if (toggle) div.appendChild(toggle);
@@ -670,16 +756,65 @@ modalCreateEl.addEventListener("click", async () => {
   await selectPersona(persona);
 });
 
+chatAttachBtnEl.addEventListener("click", () => chatFileInputEl.click());
+
+chatFileInputEl.addEventListener("change", () => {
+  addFilesToStaged(chatFileInputEl.files);
+  chatFileInputEl.value = ""; // reset so picking the same file again still fires "change"
+});
+
+// Drag-and-drop straight onto the message pane as a second way to stage
+// files, alongside the 📎 button - dragover must be prevented too, or the
+// browser's default (usually "open the file instead of dropping") wins.
+chatMessagesEl.addEventListener("dragover", (e) => {
+  if (!activePersonaId) return;
+  e.preventDefault();
+  chatMessagesEl.classList.add("drag-over");
+});
+chatMessagesEl.addEventListener("dragleave", () => chatMessagesEl.classList.remove("drag-over"));
+chatMessagesEl.addEventListener("drop", (e) => {
+  if (!activePersonaId) return;
+  e.preventDefault();
+  chatMessagesEl.classList.remove("drag-over");
+  if (e.dataTransfer.files.length) addFilesToStaged(e.dataTransfer.files);
+});
+
 chatFormEl.addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = chatTextEl.value.trim();
-  if (!text || !activePersonaId) return;
+  if ((!text && stagedAttachments.length === 0) || !activePersonaId) return;
   chatTextEl.value = "";
+
+  const attachments = await Promise.all(
+    stagedAttachments.map(async ({ file }) => ({ filename: file.name, mime: file.type || "application/octet-stream", base64: await fileToBase64(file) }))
+  );
+  // Metadata-only shape for the optimistic local render - the real ids come
+  // back once the server persists them, but the local bubble doesn't need to
+  // wait for that round trip since it renders straight from the File objects
+  // via a throwaway object URL rather than the /attachments/:id route.
+  const stagedForRender = stagedAttachments.map(({ file }) => ({ filename: file.name, mime: file.type, _localUrl: URL.createObjectURL(file) }));
+  stagedAttachments = [];
+  renderStagedAttachments();
 
   // optimistic render of the user's own message
   const userDiv = document.createElement("div");
   userDiv.className = "msg user";
   userDiv.textContent = text;
+  for (const a of stagedForRender) {
+    const row = userDiv.querySelector(":scope > .msg-attachments") ?? userDiv.appendChild(Object.assign(document.createElement("div"), { className: "msg-attachments" }));
+    if (a.mime?.startsWith("image/")) {
+      const img = document.createElement("img");
+      img.className = "msg-attachment-thumb";
+      img.src = a._localUrl;
+      img.alt = a.filename;
+      row.appendChild(img);
+    } else {
+      const chip = document.createElement("span");
+      chip.className = "msg-attachment-file";
+      chip.textContent = `📄 ${a.filename}`;
+      row.appendChild(chip);
+    }
+  }
   chatMessagesEl.appendChild(userDiv);
   chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
   showThinkingIndicator();
@@ -689,7 +824,7 @@ chatFormEl.addEventListener("submit", async (e) => {
   await fetch(`/api/personas/${activePersonaId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify({ text, attachments }),
   });
 });
 

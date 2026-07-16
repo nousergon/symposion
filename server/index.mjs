@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { ClaudeCodeSession, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES } from "./claude-code-backend.mjs";
 import { OpenCodeServerPool } from "./opencode-pool.mjs";
-import { loadPersonas, savePersonas, toRecord } from "./store.mjs";
+import { loadPersonas, savePersonas, toRecord, saveAttachment, attachmentFilePath, ATTACHMENTS_DIR } from "./store.mjs";
 import { isGitRepo, createIsolatedWorktree, removeWorktreeAndBranch } from "./worktree.mjs";
 import { SseHub } from "./sse-hub.mjs";
 import { resolveSecret } from "./secrets.mjs";
@@ -181,7 +181,7 @@ async function ensureConnected(persona) {
  * /event feed, and resolving with the full text (+ ordered tool-call parts,
  * for the visibility toggle - symposion#4) once the session goes idle.
  */
-function promptOpenCodeStreaming(persona, text, onDelta, onToolUpdate) {
+function promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpdate) {
   const { client, events } = persona.opencodeEntry;
   const partTypes = new Map(); // partID -> type ("text" | "reasoning" | ...)
   let accumulated = "";
@@ -286,7 +286,13 @@ function promptOpenCodeStreaming(persona, text, onDelta, onToolUpdate) {
         body: {
           model: { providerID: persona.providerID, modelID: persona.modelID },
           system: `Your name is ${persona.name}. If asked your name or who you are, identify yourself as ${persona.name}.`,
-          parts: [{ type: "text", text }],
+          // FilePartInput.url accepts a data: URI for inline (non-workspace)
+          // content - the standard mechanism for handing OpenCode a file that
+          // doesn't already exist on disk in the session's workspace.
+          parts: [
+            ...(text ? [{ type: "text", text }] : []),
+            ...(attachments ?? []).map((a) => ({ type: "file", mime: a.mime, filename: a.filename, url: `data:${a.mime};base64,${a.base64}` })),
+          ],
         },
       })
       .catch((err) => {
@@ -349,7 +355,10 @@ function personaSummary(p) {
 }
 
 const app = express();
-app.use(express.json());
+// Default 100kb is enough for plain-text turns but not a turn carrying a
+// couple of image/PDF attachments - 25mb covers a handful of typical
+// attachments per message without accepting arbitrarily large uploads.
+app.use(express.json({ limit: "25mb" }));
 app.use(express.static(path.join(__dirname, "..", "public")));
 
 /**
@@ -582,10 +591,19 @@ app.get("/api/personas/:id/messages", (req, res) => {
 app.post("/api/personas/:id/messages", async (req, res) => {
   const persona = personas.get(req.params.id);
   if (!persona) return res.status(404).json({ error: "not found" });
-  const { text } = req.body ?? {};
-  if (!text) return res.status(400).json({ error: "text is required" });
+  const { text, attachments: rawAttachments } = req.body ?? {};
+  if (!text && !(rawAttachments?.length > 0)) return res.status(400).json({ error: "text or attachments required" });
 
-  persona.messages.push({ role: "user", text, ts: Date.now() });
+  // rawAttachments (from the client) carries the base64 payload itself -
+  // that's what the backend adapters need to build content blocks for THIS
+  // turn. attachmentMetas is the persisted, disk-backed form (id/filename/
+  // mime/sizeBytes only, no base64) that goes into personas.json and lets
+  // the UI re-fetch the bytes later via GET .../attachments/:id - keeping
+  // the whole-file JSON store from ballooning with inlined file data.
+  const attachments = rawAttachments ?? [];
+  const attachmentMetas = attachments.map((a) => saveAttachment(persona.id, a));
+
+  persona.messages.push({ role: "user", text, ts: Date.now(), attachments: attachmentMetas });
 
   try {
     await ensureConnected(persona);
@@ -620,13 +638,13 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     };
 
     if (persona.backend === "api") {
-      const result = await promptOpenCodeStreaming(persona, text, onDelta, onToolUpdate);
+      const result = await promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpdate);
       replyText = result.text;
       parts = result.parts;
       costUsd = result.costUsd ?? 0;
       usage = result.usage ?? null;
     } else {
-      const result = await persona.claudeSession.sendMessage(text, onDelta, onToolUpdate);
+      const result = await persona.claudeSession.sendMessage(text, attachments, onDelta, onToolUpdate);
       replyText = result.replyText;
       denials = result.permissionDenials;
       parts = result.parts;
@@ -657,6 +675,32 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     console.error(err);
     res.status(500).json({ error: String(err) });
   }
+});
+
+// Serves an uploaded attachment's raw bytes back to the browser (image
+// thumbnails, file-chip downloads) without ever re-embedding base64 into the
+// polled /messages payload. attachmentFilePath does the traversal-safe path
+// resolution (store.mjs) - a 404 here just means an unknown/foreign id, not
+// a crash.
+app.get("/api/personas/:id/attachments/:attachmentId", (req, res) => {
+  const persona = personas.get(req.params.id);
+  if (!persona) return res.status(404).json({ error: "not found" });
+  const meta = persona.messages.flatMap((m) => m.attachments ?? []).find((a) => a.id === req.params.attachmentId);
+  // attachmentFilePath both validates the id (UUID-only) and confirms the
+  // file actually exists - a null here means "not found", whether the id is
+  // bogus or just belongs to a different persona.
+  const exists = meta && attachmentFilePath(persona.id, meta.id);
+  if (!exists) return res.status(404).json({ error: "attachment not found" });
+  res.setHeader("Content-Type", meta.mime || "application/octet-stream");
+  res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(meta.filename ?? meta.id)}"`);
+  // { root } (rather than the absolute path directly) matters beyond
+  // convenience: Express's sendFile applies its default dotfile rejection to
+  // EVERY segment of an absolute path, including symposion's own install
+  // path - a dotted directory anywhere upstream (`.claude/worktrees/...`,
+  // `~/.config/...`, an iCloud-synced folder) would 404 a perfectly valid
+  // attachment. Scoping to `root` means only the relative `personaId/id`
+  // portion is checked, and both are plain UUIDs - never dotted.
+  res.sendFile(path.join(persona.id, meta.id), { root: ATTACHMENTS_DIR });
 });
 
 /**
