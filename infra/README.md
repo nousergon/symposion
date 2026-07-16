@@ -53,11 +53,12 @@ tail -f ~/Library/Logs/symposion.log ~/Library/Logs/symposion.err.log
 
 ## Install
 
+Compiled straight into `/Applications` (not `~/Applications`) so it shows up in Launchpad/Spotlight like any other installed app, not just this user's account:
+
 ```
-mkdir -p ~/Applications
-osacompile -o ~/Applications/Symposion.app infra/Symposion.applescript
+osacompile -o /Applications/Symposion.app infra/Symposion.applescript
 ```
 
-Then drag `~/Applications/Symposion.app` onto the Dock for one-click access (or launch it from Launchpad/Spotlight like any other app). Requires the LaunchAgent above (or a manually-started server) already running - the launcher just opens the browser, it doesn't start the server itself.
+Then drag `/Applications/Symposion.app` onto the Dock for one-click access (or launch it from Launchpad/Spotlight like any other app). Requires the LaunchAgent above (or a manually-started server) already running - the launcher just opens the browser, it doesn't start the server itself.
 
 To give it a custom icon: select the app in Finder → Get Info → drag an image onto the icon in the top-left of the Info panel.

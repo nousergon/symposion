@@ -49,7 +49,10 @@ const TTL_WINDOW_MS = 60 * 60 * 1000; // 60 min
 // "opencode"), now that a real key is wired up (symposion#6).
 const CLAUDE_CODE_DEFAULT = { modelID: "claude-sonnet-5" };
 const API_DEFAULT = { providerID: "deepseek", modelID: "deepseek-chat" };
-const DEFAULT_WORKSPACE = path.join(DEV_ROOT, "symposion");
+// ~/Development itself, not a specific repo under it - most new personas
+// aren't working on symposion, and the old default silently pointed every
+// unconfigured persona at symposion's own working tree.
+const DEFAULT_WORKSPACE = DEV_ROOT;
 
 /**
  * Persona shape (union over both backends):
@@ -60,7 +63,12 @@ const DEFAULT_WORKSPACE = path.join(DEV_ROOT, "symposion");
  * (re)connects them - true right after loading from disk on startup.
  * pendingPermission/pendingQuestion (api backend only) are transient live
  * state - never persisted, always reconciled fresh from the OpenCode server
- * on connect (see connectApiPersona).
+ * on connect (see connectApiPersona). pendingTurn (both backends) is the
+ * same kind of transient live state - the text accumulated so far for a
+ * turn that's still generating, so a client that (re)connects mid-turn
+ * (persona switch, page reload, tab revisit) can pick up exactly where the
+ * turn currently stands instead of seeing nothing until it completes, or
+ * losing whatever streamed while it wasn't subscribed. See GET .../messages.
  */
 const personas = new Map();
 
@@ -75,6 +83,7 @@ for (const record of loadPersonas()) {
     opencodeEntry: null,
     pendingPermission: null,
     pendingQuestion: null,
+    pendingTurn: null,
   });
 }
 console.log(`[store] loaded ${personas.size} persona(s) from disk`);
@@ -457,6 +466,7 @@ app.post("/api/personas", async (req, res) => {
         lastDenials: [],
         pendingPermission: null,
         pendingQuestion: null,
+        pendingTurn: null,
       };
       await connectApiPersona(persona, entry);
     } else {
@@ -484,6 +494,7 @@ app.post("/api/personas", async (req, res) => {
         lastActivityTs: Date.now(),
         messages: [],
         lastDenials: [],
+        pendingTurn: null,
       };
     }
 
@@ -539,10 +550,24 @@ app.delete("/api/personas/:id", async (req, res) => {
   res.status(204).end();
 });
 
+/**
+ * Appends a synthetic trailing entry for a turn still in progress (pending:
+ * true) so a client that (re)connects mid-turn renders the CURRENT
+ * accumulated text instead of nothing - the fix for symposion's "agent
+ * dialogue overwriting/losing its previous response" bug: a client that
+ * switched away and back (or reloaded) used to only ever see fully-completed
+ * turns via this endpoint, so an in-flight turn was either invisible until
+ * it finished, or - worse - rendered starting from empty and only capturing
+ * whatever deltas happened to arrive AFTER resubscribing, silently dropping
+ * everything generated in the gap.
+ */
 app.get("/api/personas/:id/messages", (req, res) => {
   const persona = personas.get(req.params.id);
   if (!persona) return res.status(404).json({ error: "not found" });
-  res.json(persona.messages);
+  const messages = persona.pendingTurn
+    ? [...persona.messages, { role: "assistant", text: persona.pendingTurn.text, ts: Date.now(), pending: true }]
+    : persona.messages;
+  res.json(messages);
 });
 
 app.post("/api/personas/:id/messages", async (req, res) => {
@@ -562,7 +587,15 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     let costUsd = 0;
     let usage = null;
 
-    const onDelta = (chunk) => hub.publish(persona.id, { type: "delta", text: chunk });
+    persona.pendingTurn = { text: "" };
+    const onDelta = (chunk) => {
+      // Order matters: persist the chunk into pendingTurn.text BEFORE
+      // publishing it, since a client's GET .../messages and this SSE
+      // publish must agree on exactly which chunks are "in" vs "not yet
+      // arrived" - see the GET handler's doc comment above.
+      persona.pendingTurn.text += chunk;
+      hub.publish(persona.id, { type: "delta", text: chunk });
+    };
 
     if (persona.backend === "api") {
       const result = await promptOpenCodeStreaming(persona, text, onDelta);
@@ -579,6 +612,7 @@ app.post("/api/personas/:id/messages", async (req, res) => {
       usage = result.usage ?? null;
     }
 
+    persona.pendingTurn = null;
     persona.lastActivityTs = Date.now();
     persona.lastDenials = denials;
     accumulateUsage(persona, costUsd, usage);
@@ -597,6 +631,7 @@ app.post("/api/personas/:id/messages", async (req, res) => {
 
     res.json({ persona: personaSummary(persona), reply: replyText, denials, parts, costUsd, usage });
   } catch (err) {
+    persona.pendingTurn = null;
     console.error(err);
     res.status(500).json({ error: String(err) });
   }
