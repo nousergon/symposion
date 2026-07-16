@@ -293,6 +293,85 @@ function buildCostCaption(costUsd, usage) {
   return caption;
 }
 
+function truncateLabel(s, n) {
+  if (typeof s !== "string") return String(s ?? "");
+  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+}
+
+/**
+ * One-line label for a live (in-progress) tool entry - the raw tool name
+ * alone ("Task", "Bash") gives no sense of WHAT it's doing, which is exactly
+ * the gap this live view exists to close. Task (subagent dispatch) surfaces
+ * its `description` input since that's the human-meaningful part; other
+ * tools fall back to whichever common input field reads as a summary.
+ */
+function toolLiveLabel(t) {
+  const input = t.input ?? {};
+  const hint = input.description ?? input.command ?? input.file_path ?? input.pattern ?? input.path ?? input.prompt;
+  const name = t.name ?? "tool";
+  return hint ? `${name} — ${truncateLabel(hint, 70)}` : name;
+}
+
+/**
+ * Ensures the message bubble has a dedicated text-content element instead of
+ * writing straight into the bubble's own textContent - once live tool
+ * entries (buildLiveTools below) can be siblings inside the same bubble,
+ * `bubble.textContent += chunk` would silently blow away those sibling
+ * elements (textContent assignment replaces ALL children, not just text).
+ */
+function ensureMsgTextEl(bubble) {
+  let el = bubble.querySelector(":scope > .msg-text");
+  if (!el) {
+    el = document.createElement("span");
+    el.className = "msg-text";
+    bubble.insertBefore(el, bubble.firstChild);
+  }
+  return el;
+}
+
+/**
+ * Live-updating list of in-progress/just-finished tool calls for a turn
+ * that's still streaming - the "how do I know the agent is actually working"
+ * gap: previously the only mid-turn signal was a generic bouncing-dots
+ * indicator for the entire duration of a turn, with zero visibility into
+ * what it was doing even when it fired off a dozen-plus tool calls (e.g. a
+ * Task-tool subagent fan-out) that could run for minutes. Keyed by
+ * toolUseId so repeated updates (running -> done/error) update the same row
+ * in place rather than appending duplicates. Superseded by the final
+ * collapsed buildToolPartsToggle() once the turn's "done" event lands.
+ */
+function upsertLiveToolPart(bubble, part) {
+  bubble._liveToolParts = bubble._liveToolParts ?? [];
+  const idx = bubble._liveToolParts.findIndex((p) => p.toolUseId === part.toolUseId);
+  if (idx >= 0) bubble._liveToolParts[idx] = part;
+  else bubble._liveToolParts.push(part);
+
+  let el = bubble.querySelector(":scope > .live-tools");
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "live-tools";
+    bubble.appendChild(el);
+  }
+  el.innerHTML = "";
+  for (const t of bubble._liveToolParts) {
+    const row = document.createElement("div");
+    row.className = `live-tool-entry ${t.status ?? "running"}`;
+    const dot = document.createElement("span");
+    dot.className = "live-tool-dot";
+    row.appendChild(dot);
+    const label = document.createElement("span");
+    label.className = "live-tool-label";
+    label.textContent = toolLiveLabel(t);
+    row.appendChild(label);
+    el.appendChild(row);
+  }
+}
+
+function clearLiveTools(bubble) {
+  bubble.querySelector(":scope > .live-tools")?.remove();
+  bubble._liveToolParts = null;
+}
+
 function buildToolPartsToggle(parts) {
   const toolParts = (parts ?? []).filter((p) => p.type === "tool");
   if (toolParts.length === 0) return null;
@@ -364,7 +443,19 @@ function connectStream(personaId) {
         streamingBubble.className = "msg assistant";
         chatMessagesEl.appendChild(streamingBubble);
       }
-      streamingBubble.textContent += evt.text;
+      ensureMsgTextEl(streamingBubble).textContent += evt.text;
+      chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+    } else if (evt.type === "tool") {
+      // First real signal of activity on a turn that opens with tool calls
+      // before any text (e.g. a Task-tool subagent dispatch) - clear the
+      // opaque "thinking" dots and start showing what's actually running.
+      clearThinkingIndicator();
+      if (!streamingBubble) {
+        streamingBubble = document.createElement("div");
+        streamingBubble.className = "msg assistant";
+        chatMessagesEl.appendChild(streamingBubble);
+      }
+      upsertLiveToolPart(streamingBubble, evt);
       chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
     } else if (evt.type === "done") {
       clearThinkingIndicator();
@@ -374,10 +465,14 @@ function connectStream(personaId) {
       if (!streamingBubble && (evt.text || evt.parts?.length)) {
         streamingBubble = document.createElement("div");
         streamingBubble.className = "msg assistant";
-        streamingBubble.textContent = evt.text || "";
         chatMessagesEl.appendChild(streamingBubble);
       }
       if (streamingBubble) {
+        if (evt.text) ensureMsgTextEl(streamingBubble).textContent = evt.text;
+        // The live in-progress list is superseded by the full collapsed
+        // detail toggle below - drop it rather than show the same tool
+        // calls twice.
+        clearLiveTools(streamingBubble);
         streamingBubble.classList.toggle("blocked", (evt.denials?.length ?? 0) > 0);
         const toggle = buildToolPartsToggle(evt.parts);
         if (toggle) streamingBubble.appendChild(toggle);
@@ -426,12 +521,17 @@ async function loadMessages() {
   for (const m of messages) {
     const div = document.createElement("div");
     div.className = `msg ${m.role}` + (m.blocked ? " blocked" : "");
-    div.textContent = m.text;
+    ensureMsgTextEl(div).textContent = m.text;
     if (!m.pending) {
       const toggle = buildToolPartsToggle(m.parts);
       if (toggle) div.appendChild(toggle);
       const costCaption = buildCostCaption(m.costUsd, m.usage);
       if (costCaption) div.appendChild(costCaption);
+    } else {
+      // Turn still in flight server-side - replay its tool calls so far into
+      // the same live (running/done/error) view a fresh SSE "tool" event
+      // would build, instead of showing a blank bubble until the next one arrives.
+      for (const part of m.parts ?? []) upsertLiveToolPart(div, part);
     }
     chatMessagesEl.appendChild(div);
     if (m.pending) streamingBubble = div;

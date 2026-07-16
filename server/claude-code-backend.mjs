@@ -175,11 +175,14 @@ export class ClaudeCodeSession {
     }
 
     if (evt.type === "assistant") {
+      const pending = this.queue[0];
       for (const block of evt.message?.content ?? []) {
         if (block.type === "text") {
           this.currentParts.push({ type: "text", text: block.text });
         } else if (block.type === "tool_use") {
-          this.currentParts.push({ type: "tool", name: block.name, input: block.input, toolUseId: block.id, output: null, isError: null });
+          const part = { type: "tool", name: block.name, input: block.input, toolUseId: block.id, output: null, isError: null };
+          this.currentParts.push(part);
+          pending?.onToolUpdate?.({ ...part, status: "running" });
         }
         // "thinking" blocks intentionally skipped - chat-only view.
       }
@@ -187,6 +190,7 @@ export class ClaudeCodeSession {
     }
 
     if (evt.type === "user") {
+      const pending = this.queue[0];
       for (const block of evt.message?.content ?? []) {
         if (block.type !== "tool_result") continue;
         // Search from the end - a toolUseId is unique per call, but scanning
@@ -196,6 +200,7 @@ export class ClaudeCodeSession {
           if (part.type === "tool" && part.toolUseId === block.tool_use_id) {
             part.output = typeof block.content === "string" ? block.content : JSON.stringify(block.content);
             part.isError = !!block.is_error;
+            pending?.onToolUpdate?.({ ...part, status: part.isError ? "error" : "done" });
             break;
           }
         }
@@ -232,13 +237,18 @@ export class ClaudeCodeSession {
     }
   }
 
-  /** @param {(chunk: string) => void} [onDelta] - called with each visible text chunk as it streams */
-  sendMessage(text, onDelta) {
+  /**
+   * @param {(chunk: string) => void} [onDelta] - called with each visible text chunk as it streams
+   * @param {(part: object) => void} [onToolUpdate] - called with a tool part (status: "running"|"done"|"error")
+   *   as it starts (tool_use) and again once its result lands (tool_result) - lets callers show live
+   *   tool-call progress instead of a mid-turn blackout while the turn is still in flight.
+   */
+  sendMessage(text, onDelta, onToolUpdate) {
     if (!this.alive) {
       return Promise.reject(new Error(this.crashError || "claude process is not running"));
     }
     return new Promise((resolve, reject) => {
-      this.queue.push({ resolve, reject, onDelta });
+      this.queue.push({ resolve, reject, onDelta, onToolUpdate });
       const line = JSON.stringify({ type: "user", message: { role: "user", content: text } });
       this.proc.stdin.write(line + "\n");
     });
