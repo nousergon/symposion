@@ -236,6 +236,29 @@ function promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpda
           // own pending->running transition happens too fast to be worth a
           // separate UI state, unlike its distinct completed/error outcomes.
           onToolUpdate?.({ ...toolPart, status: state === "completed" ? "done" : state === "error" ? "error" : "running" });
+        } else if (type === "subtask" && !partIndexById.has(id)) {
+          // Subagent dispatch - OpenCode models this as its own part type
+          // (SubtaskPartInput: prompt/description/agent), not a "tool" part,
+          // and unlike a "tool" part it carries no state/status field at all
+          // - there's no completion event to key off, only the parent turn
+          // eventually going idle. Reshaped into the same {type:"tool",
+          // name:"Agent"} shape the claude-code backend uses so it gets
+          // identical live-list/collapsed-toggle rendering (including the
+          // Agent-specific styling and elapsed timer in app.js) for free.
+          // Without this branch these parts were silently dropped - a
+          // subagent dispatch on the OpenCode backend had zero visibility,
+          // not even a flat row.
+          const toolPart = {
+            type: "tool",
+            toolUseId: id,
+            name: "Agent",
+            input: { subagent_type: props.part.agent, description: props.part.description, prompt: props.part.prompt },
+            output: null,
+            isError: false,
+          };
+          partIndexById.set(id, orderedParts.length);
+          orderedParts.push(toolPart);
+          onToolUpdate?.({ ...toolPart, status: "running" });
         }
         // "reasoning"/"step-start"/"step-finish" intentionally skipped - chat-only view.
       } else if (evt.type === "message.part.delta" && props.field === "text") {

@@ -247,6 +247,17 @@ body {
   to { transform: rotate(360deg); }
 }
 
+/* Subagent (Agent tool) dispatches get their own accent so they read as
+   "a subagent is working" rather than a generic tool call - the CLI gives no
+   visibility into the subagent's own steps, so this + the elapsed timer in
+   its label (toolLiveLabel) is the clearest signal available. */
+.live-tool-entry.agent .live-tool-dot { border-radius: 3px; }
+.live-tool-entry.agent.running .live-tool-dot {
+  border-color: #bf5af2; border-top-color: transparent;
+}
+.live-tool-entry.agent.running .live-tool-label { color: #d9a6ff; }
+.live-tool-entry.agent.done .live-tool-dot { background: #bf5af2; border-color: #bf5af2; }
+
 .attach-btn {
   background: #2c2c2e; color: #aeaeb2; border: 1px solid #3a3a3c;
   border-radius: 8px; padding: 10px 12px; cursor: pointer; font-size: 15px; line-height: 1;
