@@ -20,6 +20,7 @@ const chatFileInputEl = document.getElementById("chat-file-input");
 const chatAttachBtnEl = document.getElementById("chat-attach-btn");
 const stagedAttachmentsEl = document.getElementById("staged-attachments");
 const newAgentBtn = document.getElementById("new-agent-btn");
+const restartServerBtn = document.getElementById("restart-server-btn");
 const blockedCardEl = document.getElementById("blocked-card");
 
 const modalEl = document.getElementById("new-agent-modal");
@@ -813,6 +814,44 @@ dirBrowserCancelEl.addEventListener("click", () => { dirBrowserModalEl.hidden = 
 dirBrowserSelectEl.addEventListener("click", () => {
   modalWorkspaceEl.value = dirBrowserPath;
   dirBrowserModalEl.hidden = true;
+});
+
+/**
+ * Restarts the whole server process (every persona, every in-flight turn -
+ * not just the current one) so a deployed code update lands without
+ * Activity Monitor / launchctl. The LaunchAgent's KeepAlive:true
+ * (com.nousergon.symposion.plist) respawns it within a second or two of
+ * exit - the server-side handler just responds then exits, same "any exit
+ * is a crash to recover from" contract the documented launchctl/kill
+ * restart paths already rely on. Polls /api/defaults (cheap, read-only)
+ * until the fresh process answers, then does a full navigation reload so
+ * updated HTML/CSS/JS ship too, not just server-side behavior.
+ */
+restartServerBtn.addEventListener("click", async () => {
+  if (!confirm("Restart the symposion server? This drops every agent's in-flight turn, not just this one.")) return;
+  restartServerBtn.disabled = true;
+  restartServerBtn.classList.add("spinning");
+  try {
+    await fetch("/api/server/restart", { method: "POST" });
+  } catch {
+    // Expected - the connection can drop as the process exits mid-response.
+  }
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      const res = await fetch("/api/defaults");
+      if (res.ok) {
+        location.reload();
+        return;
+      }
+    } catch {
+      // Still down - keep polling.
+    }
+  }
+  alert("Server didn't come back within 30s - check Activity Monitor or ~/Library/Logs/symposion.err.log.");
+  restartServerBtn.disabled = false;
+  restartServerBtn.classList.remove("spinning");
 });
 
 newAgentBtn.addEventListener("click", async () => {

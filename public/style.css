@@ -23,6 +23,18 @@ body {
   border-bottom: 1px solid #2c2c2e;
 }
 .brand { font-weight: 600; font-size: 15px; letter-spacing: 0.02em; }
+.header-actions { display: flex; align-items: center; gap: 6px; }
+.icon-btn {
+  background: #3a3a3c; color: #fff; border: none; border-radius: 6px;
+  width: 26px; height: 26px; cursor: pointer; font-size: 14px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.icon-btn:hover:not(:disabled) { background: #48484a; }
+.icon-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.icon-btn.spinning { animation: icon-btn-spin 0.8s linear infinite; }
+@keyframes icon-btn-spin {
+  to { transform: rotate(360deg); }
+}
 #new-agent-btn {
   background: #3a3a3c;
   color: #fff;
