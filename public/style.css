@@ -217,3 +217,32 @@ body {
 }
 .tool-part-output { color: #9a9a9e; border-top: 1px dashed #3a3a3c; padding-top: 4px; }
 .tool-part-entry.error .tool-part-output { color: #ff9b96; }
+
+.msg-text:empty { display: none; }
+
+.live-tools {
+  display: flex; flex-direction: column; gap: 4px;
+  margin-top: 8px; padding-top: 6px; border-top: 1px solid #ffffff22;
+}
+.live-tool-entry {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 11px; color: #b0b0b5;
+}
+.live-tool-label {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.live-tool-dot {
+  flex: none; width: 8px; height: 8px; border-radius: 50%;
+  border: 1.5px solid #6a6a6e; box-sizing: border-box;
+}
+.live-tool-entry.running .live-tool-dot {
+  border-color: #0a84ff; border-top-color: transparent;
+  animation: live-tool-spin 0.7s linear infinite;
+}
+.live-tool-entry.running .live-tool-label { color: #eaeaea; }
+.live-tool-entry.done .live-tool-dot { background: #34c759; border-color: #34c759; }
+.live-tool-entry.error .live-tool-dot { background: #ff453a; border-color: #ff453a; }
+.live-tool-entry.error .live-tool-label { color: #ff9b96; }
+@keyframes live-tool-spin {
+  to { transform: rotate(360deg); }
+}

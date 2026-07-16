@@ -181,7 +181,7 @@ async function ensureConnected(persona) {
  * /event feed, and resolving with the full text (+ ordered tool-call parts,
  * for the visibility toggle - symposion#4) once the session goes idle.
  */
-function promptOpenCodeStreaming(persona, text, onDelta) {
+function promptOpenCodeStreaming(persona, text, onDelta, onToolUpdate) {
   const { client, events } = persona.opencodeEntry;
   const partTypes = new Map(); // partID -> type ("text" | "reasoning" | ...)
   let accumulated = "";
@@ -217,12 +217,14 @@ function promptOpenCodeStreaming(persona, text, onDelta) {
           partIndexById.set(id, orderedParts.length);
           orderedParts.push({ type: "text", text: "" });
         } else if (type === "tool") {
+          const state = props.part.state?.status ?? "pending";
           const toolPart = {
             type: "tool",
+            toolUseId: id,
             name: props.part.tool,
             input: props.part.state?.input ?? {},
             output: props.part.state?.output ?? null,
-            isError: props.part.state?.status === "error",
+            isError: state === "error",
           };
           if (partIndexById.has(id)) {
             orderedParts[partIndexById.get(id)] = toolPart;
@@ -230,6 +232,10 @@ function promptOpenCodeStreaming(persona, text, onDelta) {
             partIndexById.set(id, orderedParts.length);
             orderedParts.push(toolPart);
           }
+          // "pending"/"running" both read as "still going" to callers - OpenCode's
+          // own pending->running transition happens too fast to be worth a
+          // separate UI state, unlike its distinct completed/error outcomes.
+          onToolUpdate?.({ ...toolPart, status: state === "completed" ? "done" : state === "error" ? "error" : "running" });
         }
         // "reasoning"/"step-start"/"step-finish" intentionally skipped - chat-only view.
       } else if (evt.type === "message.part.delta" && props.field === "text") {
@@ -565,7 +571,10 @@ app.get("/api/personas/:id/messages", (req, res) => {
   const persona = personas.get(req.params.id);
   if (!persona) return res.status(404).json({ error: "not found" });
   const messages = persona.pendingTurn
-    ? [...persona.messages, { role: "assistant", text: persona.pendingTurn.text, ts: Date.now(), pending: true }]
+    ? [
+        ...persona.messages,
+        { role: "assistant", text: persona.pendingTurn.text, parts: persona.pendingTurn.parts, ts: Date.now(), pending: true },
+      ]
     : persona.messages;
   res.json(messages);
 });
@@ -587,7 +596,7 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     let costUsd = 0;
     let usage = null;
 
-    persona.pendingTurn = { text: "" };
+    persona.pendingTurn = { text: "", parts: [] };
     const onDelta = (chunk) => {
       // Order matters: persist the chunk into pendingTurn.text BEFORE
       // publishing it, since a client's GET .../messages and this SSE
@@ -596,15 +605,28 @@ app.post("/api/personas/:id/messages", async (req, res) => {
       persona.pendingTurn.text += chunk;
       hub.publish(persona.id, { type: "delta", text: chunk });
     };
+    // Same order-matters rule as onDelta above, and the same reconnect-safety
+    // motivation: without persisting live tool state into pendingTurn.parts,
+    // a client that reloads mid-turn (or a turn that never emits any text,
+    // e.g. tool-only) shows nothing but the generic thinking indicator for
+    // however long the turn runs - no visibility into whether a subagent is
+    // actually working or the persona has stalled (symposion "better tool
+    // call progress visibility").
+    const onToolUpdate = (toolUpdate) => {
+      const idx = persona.pendingTurn.parts.findIndex((p) => p.toolUseId === toolUpdate.toolUseId);
+      if (idx >= 0) persona.pendingTurn.parts[idx] = toolUpdate;
+      else persona.pendingTurn.parts.push(toolUpdate);
+      hub.publish(persona.id, { type: "tool", ...toolUpdate });
+    };
 
     if (persona.backend === "api") {
-      const result = await promptOpenCodeStreaming(persona, text, onDelta);
+      const result = await promptOpenCodeStreaming(persona, text, onDelta, onToolUpdate);
       replyText = result.text;
       parts = result.parts;
       costUsd = result.costUsd ?? 0;
       usage = result.usage ?? null;
     } else {
-      const result = await persona.claudeSession.sendMessage(text, onDelta);
+      const result = await persona.claudeSession.sendMessage(text, onDelta, onToolUpdate);
       replyText = result.replyText;
       denials = result.permissionDenials;
       parts = result.parts;
