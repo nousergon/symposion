@@ -246,3 +246,39 @@ body {
 @keyframes live-tool-spin {
   to { transform: rotate(360deg); }
 }
+
+.attach-btn {
+  background: #2c2c2e; color: #aeaeb2; border: 1px solid #3a3a3c;
+  border-radius: 8px; padding: 10px 12px; cursor: pointer; font-size: 15px; line-height: 1;
+}
+.attach-btn:hover:not(:disabled) { background: #3a3a3c; }
+
+.staged-attachments {
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 0 14px 10px 14px;
+}
+.staged-attachments[hidden] { display: none; }
+.attachment-chip {
+  display: flex; align-items: center; gap: 6px;
+  background: #2c2c2e; border: 1px solid #3a3a3c; border-radius: 6px;
+  padding: 4px 6px 4px 10px; font-size: 11px; color: #eaeaea;
+}
+.attachment-chip-size { color: #9a9a9e; }
+.attachment-chip-remove {
+  background: none; border: none; color: #9a9a9e; font-size: 14px;
+  line-height: 1; cursor: pointer; padding: 2px 4px; border-radius: 4px;
+}
+.attachment-chip-remove:hover { color: #ff453a; background: #3a3a3c; }
+
+.chat-messages.drag-over { outline: 2px dashed #0a84ff; outline-offset: -8px; }
+
+.msg-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.msg-attachment-thumb {
+  max-width: 180px; max-height: 180px; border-radius: 8px; display: block;
+}
+.msg-attachment-file {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: #00000022; border-radius: 6px; padding: 6px 10px;
+  font-size: 12px; color: inherit; text-decoration: none;
+}
+.msg.user .msg-attachment-file { background: #ffffff22; }
+.msg-attachment-file:hover { text-decoration: underline; }

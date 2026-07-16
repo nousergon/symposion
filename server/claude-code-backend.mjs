@@ -61,6 +61,30 @@ export const CLAUDE_PERMISSION_MODES = [
   { value: "plan", name: "Plan mode" },
 ];
 
+// Text/code mimes get sent as an Anthropic "document" block with a plain-text
+// source rather than base64 - decoding to UTF-8 text lets the model read the
+// content directly instead of round-tripping through a PDF-style opaque blob,
+// and matches how Claude.ai treats a dropped .txt/.py/.md file.
+function isTextMime(mime) {
+  return mime.startsWith("text/") || /json|xml|yaml|javascript|typescript/.test(mime);
+}
+
+function toContentBlock(a) {
+  if (a.mime.startsWith("image/")) {
+    return { type: "image", source: { type: "base64", media_type: a.mime, data: a.base64 } };
+  }
+  if (isTextMime(a.mime)) {
+    return {
+      type: "document",
+      source: { type: "text", media_type: "text/plain", data: Buffer.from(a.base64, "base64").toString("utf8") },
+      title: a.filename,
+    };
+  }
+  // application/pdf and anything else unrecognized - treat as a base64 document,
+  // matching the Anthropic Messages API's own default document handling.
+  return { type: "document", source: { type: "base64", media_type: a.mime, data: a.base64 }, title: a.filename };
+}
+
 export class ClaudeCodeSession {
   /**
    * @param {boolean} resume - true when reconnecting to a persona that
@@ -238,18 +262,30 @@ export class ClaudeCodeSession {
   }
 
   /**
+   * @param {Array<{filename:string, mime:string, base64:string}>} [attachments]
    * @param {(chunk: string) => void} [onDelta] - called with each visible text chunk as it streams
    * @param {(part: object) => void} [onToolUpdate] - called with a tool part (status: "running"|"done"|"error")
    *   as it starts (tool_use) and again once its result lands (tool_result) - lets callers show live
    *   tool-call progress instead of a mid-turn blackout while the turn is still in flight.
    */
-  sendMessage(text, onDelta, onToolUpdate) {
+  sendMessage(text, attachments, onDelta, onToolUpdate) {
     if (!this.alive) {
       return Promise.reject(new Error(this.crashError || "claude process is not running"));
     }
     return new Promise((resolve, reject) => {
       this.queue.push({ resolve, reject, onDelta, onToolUpdate });
-      const line = JSON.stringify({ type: "user", message: { role: "user", content: text } });
+      // No attachments: keep the plain-string content shape exactly as
+      // before (zero wire-format change for the common case). With
+      // attachments, switch to an Anthropic content-block array - the same
+      // shape _handleLine already parses on the way OUT for assistant turns
+      // (evt.message.content as an array of {type, ...} blocks), so the
+      // stdin protocol accepting it symmetrically on the way in is the
+      // CLI's own message format, not a symposion invention.
+      const content =
+        (attachments?.length ?? 0) === 0
+          ? text
+          : [...(text ? [{ type: "text", text }] : []), ...attachments.map(toContentBlock)];
+      const line = JSON.stringify({ type: "user", message: { role: "user", content } });
       this.proc.stdin.write(line + "\n");
     });
   }
