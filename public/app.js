@@ -425,15 +425,31 @@ function truncateLabel(s, n) {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
+function elapsedLabel(startedAt) {
+  const secs = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+  if (secs < 60) return `${secs}s`;
+  return `${Math.floor(secs / 60)}m${String(secs % 60).padStart(2, "0")}s`;
+}
+
 /**
  * One-line label for a live (in-progress) tool entry - the raw tool name
- * alone ("Task", "Bash") gives no sense of WHAT it's doing, which is exactly
- * the gap this live view exists to close. Task (subagent dispatch) surfaces
- * its `description` input since that's the human-meaningful part; other
- * tools fall back to whichever common input field reads as a summary.
+ * alone ("Agent", "Bash") gives no sense of WHAT it's doing, which is exactly
+ * the gap this live view exists to close. The Agent tool (subagent dispatch)
+ * has no visibility into the subagent's own tool calls (the CLI's stream-json
+ * output never emits sidechain events for it - only one running->done pair
+ * for the whole dispatch), so the best available signal is its `subagent_type`
+ * + `description` input plus a live elapsed timer while it runs. Other tools
+ * fall back to whichever common input field reads as a summary.
  */
 function toolLiveLabel(t) {
   const input = t.input ?? {};
+  if (t.name === "Agent") {
+    const kind = input.subagent_type ? ` (${input.subagent_type})` : "";
+    const desc = input.description ?? input.prompt;
+    const base = `Subagent${kind}`;
+    const label = desc ? `${base} — ${truncateLabel(desc, 60)}` : base;
+    return t.status === "running" && t.startedAt ? `${label} · ${elapsedLabel(t.startedAt)}` : label;
+  }
   const hint = input.description ?? input.command ?? input.file_path ?? input.pattern ?? input.path ?? input.prompt;
   const name = t.name ?? "tool";
   return hint ? `${name} — ${truncateLabel(hint, 70)}` : name;
@@ -467,12 +483,7 @@ function ensureMsgTextEl(bubble) {
  * in place rather than appending duplicates. Superseded by the final
  * collapsed buildToolPartsToggle() once the turn's "done" event lands.
  */
-function upsertLiveToolPart(bubble, part) {
-  bubble._liveToolParts = bubble._liveToolParts ?? [];
-  const idx = bubble._liveToolParts.findIndex((p) => p.toolUseId === part.toolUseId);
-  if (idx >= 0) bubble._liveToolParts[idx] = part;
-  else bubble._liveToolParts.push(part);
-
+function renderLiveTools(bubble) {
   let el = bubble.querySelector(":scope > .live-tools");
   if (!el) {
     el = document.createElement("div");
@@ -480,9 +491,9 @@ function upsertLiveToolPart(bubble, part) {
     bubble.appendChild(el);
   }
   el.innerHTML = "";
-  for (const t of bubble._liveToolParts) {
+  for (const t of bubble._liveToolParts ?? []) {
     const row = document.createElement("div");
-    row.className = `live-tool-entry ${t.status ?? "running"}`;
+    row.className = `live-tool-entry ${t.status ?? "running"}${t.name === "Agent" ? " agent" : ""}`;
     const dot = document.createElement("span");
     dot.className = "live-tool-dot";
     row.appendChild(dot);
@@ -494,9 +505,49 @@ function upsertLiveToolPart(bubble, part) {
   }
 }
 
+/**
+ * Re-renders every ~1s while any Agent (subagent) row is running, so the
+ * elapsed timer in its label keeps ticking - a subagent dispatch can run for
+ * minutes with zero other signal in between (see toolLiveLabel), so the
+ * timer is the only feedback the run hasn't stalled. Self-stops once no
+ * running Agent rows remain, and clearLiveTools always tears it down.
+ */
+function ensureLiveToolsTicker(bubble) {
+  const hasRunningAgent = (bubble._liveToolParts ?? []).some((p) => p.name === "Agent" && p.status === "running");
+  if (!hasRunningAgent) {
+    clearInterval(bubble._liveToolsTimer);
+    bubble._liveToolsTimer = null;
+    return;
+  }
+  if (bubble._liveToolsTimer) return;
+  bubble._liveToolsTimer = setInterval(() => {
+    if (!bubble.isConnected) {
+      clearInterval(bubble._liveToolsTimer);
+      bubble._liveToolsTimer = null;
+      return;
+    }
+    renderLiveTools(bubble);
+    ensureLiveToolsTicker(bubble);
+  }, 1000);
+}
+
+function upsertLiveToolPart(bubble, part) {
+  bubble._liveToolParts = bubble._liveToolParts ?? [];
+  const idx = bubble._liveToolParts.findIndex((p) => p.toolUseId === part.toolUseId);
+  const startedAt = idx >= 0 ? bubble._liveToolParts[idx].startedAt : Date.now();
+  const merged = { ...part, startedAt };
+  if (idx >= 0) bubble._liveToolParts[idx] = merged;
+  else bubble._liveToolParts.push(merged);
+
+  renderLiveTools(bubble);
+  ensureLiveToolsTicker(bubble);
+}
+
 function clearLiveTools(bubble) {
   bubble.querySelector(":scope > .live-tools")?.remove();
   bubble._liveToolParts = null;
+  clearInterval(bubble._liveToolsTimer);
+  bubble._liveToolsTimer = null;
 }
 
 function buildToolPartsToggle(parts) {
