@@ -34,7 +34,7 @@ function resolveClaudeBinary() {
   }
   return "claude"; // last resort - PATH-based lookup, same as before this fix
 }
-const CLAUDE_BIN = resolveClaudeBinary();
+export const CLAUDE_BIN = resolveClaudeBinary();
 
 export const CLAUDE_MODELS = [
   { modelID: "claude-sonnet-5", name: "Sonnet 5" },

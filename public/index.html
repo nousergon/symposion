@@ -18,8 +18,12 @@
       <ul id="persona-list"></ul>
     </aside>
     <main class="chat">
-      <div class="chat-header" id="chat-header">Select or create an agent to begin</div>
+      <div class="chat-header" id="chat-header">
+        <span id="chat-header-text">Select or create an agent to begin</span>
+        <button type="button" id="handoff-btn" class="handoff-btn" title="Hand this session off to Remote Control - continue it from the Claude mobile app or claude.ai/code" hidden>📱 Hand off</button>
+      </div>
       <div class="chat-messages" id="chat-messages"></div>
+      <div class="handoff-card" id="handoff-card" hidden></div>
       <div class="blocked-card" id="blocked-card" hidden></div>
       <div class="staged-attachments" id="staged-attachments" hidden></div>
       <form class="chat-input" id="chat-form">
