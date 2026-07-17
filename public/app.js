@@ -12,7 +12,9 @@ let latestPersonas = []; // last /api/personas snapshot, kept for sync lookups (
 let stagedAttachments = []; // [{ file: File, localId }] - staged for the NEXT send, cleared after submit
 
 const personaListEl = document.getElementById("persona-list");
-const chatHeaderEl = document.getElementById("chat-header");
+const chatHeaderTextEl = document.getElementById("chat-header-text");
+const handoffBtnEl = document.getElementById("handoff-btn");
+const handoffCardEl = document.getElementById("handoff-card");
 const chatMessagesEl = document.getElementById("chat-messages");
 const chatFormEl = document.getElementById("chat-form");
 const chatTextEl = document.getElementById("chat-text");
@@ -118,7 +120,7 @@ function renderPersonaList(personas) {
     li.innerHTML = `
       <span class="ttl-dot ${p.ttlStatus}" title="${p.ttlApproximate ? "Approximate - real cache window unknown for this provider" : "Confirmed 1-hour ephemeral cache window"}"></span>
       <span class="persona-name-block">
-        <span class="persona-name">${p.blocked ? '<span class="blocked-flag">⚠</span>' : ""}${p.name}${p.alive ? "" : " (crashed)"}</span>
+        <span class="persona-name">${p.blocked ? '<span class="blocked-flag">⚠</span>' : ""}${p.handoff ? '<span class="handoff-flag" title="Handed off to Remote Control">📱</span>' : ""}${p.name}${p.alive ? "" : " (crashed)"}</span>
         <span class="persona-model">${modelLabel(p)} · ${workspaceLabel(p)}${costLabel(p.totalCostUsd) ? ` · ${costLabel(p.totalCostUsd)}` : ""}</span>
       </span>
       <span class="ttl-label" title="${p.ttlApproximate ? "Approximate - real cache window unknown for this provider" : "Confirmed 1-hour ephemeral cache window"}">${ttlLabel(p)}</span>
@@ -141,7 +143,10 @@ async function deletePersona(p) {
   if (p.id === activePersonaId) {
     activePersonaId = null;
     if (activeStream) { activeStream.close(); activeStream = null; }
-    chatHeaderEl.textContent = "Select or create an agent to begin";
+    chatHeaderTextEl.textContent = "Select or create an agent to begin";
+    handoffBtnEl.hidden = true;
+    handoffCardEl.hidden = true;
+    handoffCardEl.innerHTML = "";
     chatMessagesEl.innerHTML = "";
     chatTextEl.disabled = true;
     chatAttachBtnEl.disabled = true;
@@ -157,9 +162,97 @@ async function refreshPersonas() {
   const personas = await fetchPersonas();
   latestPersonas = personas;
   renderPersonaList(personas);
-  renderBlockedCard(personas.find((p) => p.id === activePersonaId));
+  const active = personas.find((p) => p.id === activePersonaId);
+  renderBlockedCard(active);
+  renderHandoffState(active);
   return personas;
 }
+
+/** Enables/disables the whole composer row - used while a persona is handed off to Remote Control. */
+function setComposerEnabled(enabled) {
+  chatTextEl.disabled = !enabled;
+  chatAttachBtnEl.disabled = !enabled;
+  document.getElementById("chat-send-btn").disabled = !enabled;
+  chatTextEl.placeholder = enabled ? "Message this agent..." : "Handed off to Remote Control - reclaim to message from here";
+}
+
+/**
+ * Keeps the header button, the handoff card, and the composer in sync with
+ * the active persona's handoff state on every refresh (5s poll + SSE
+ * events) - so a handoff started or reclaimed from another tab converges
+ * here too. Idempotent by re-rendering only when the card's content would
+ * actually change (keyed on the URL + liveness), so the QR <img> isn't
+ * re-fetched every poll.
+ */
+function renderHandoffState(persona) {
+  if (!persona) {
+    handoffBtnEl.hidden = true;
+    handoffCardEl.hidden = true;
+    handoffCardEl.innerHTML = "";
+    return;
+  }
+
+  handoffBtnEl.hidden = persona.backend !== "claude-code" || !!persona.handoff;
+
+  if (!persona.handoff) {
+    if (!handoffCardEl.hidden) {
+      handoffCardEl.hidden = true;
+      handoffCardEl.innerHTML = "";
+      setComposerEnabled(true);
+    }
+    return;
+  }
+
+  setComposerEnabled(false);
+  const key = `${persona.handoff.url}|${persona.handoff.alive}`;
+  if (handoffCardEl.dataset.key === key && !handoffCardEl.hidden) return;
+  handoffCardEl.dataset.key = key;
+  handoffCardEl.hidden = false;
+  handoffCardEl.innerHTML = `
+    <div class="handoff-card-title">📱 Handed off to Remote Control${persona.handoff.alive ? "" : " · <span class=\"handoff-dead\">process ended</span>"}</div>
+    <div class="handoff-card-body">
+      <img class="handoff-qr" src="/api/personas/${persona.id}/handoff-qr" alt="QR code for the Remote Control session" />
+      <div class="handoff-card-detail">
+        <div>Scan with your phone's camera, open the link in the Claude app, or find this session in claude.ai/code.</div>
+        <a href="${escapeHtml(persona.handoff.url)}" target="_blank" rel="noopener">${escapeHtml(persona.handoff.url)}</a>
+        <div class="handoff-hint">Messaging from symposion is paused while the session is remote. Reclaiming imports everything done remotely back into this chat.</div>
+      </div>
+    </div>
+    <div class="handoff-card-actions">
+      <button type="button" id="handoff-reclaim-btn" class="blocked-btn allow">Reclaim session</button>
+    </div>
+  `;
+  handoffCardEl.querySelector("#handoff-reclaim-btn").addEventListener("click", async () => {
+    handoffCardEl.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    const res = await fetch(`/api/personas/${persona.id}/reclaim`, { method: "POST" });
+    const data = await res.json();
+    if (data.importError) alert(`Session reclaimed, but importing the remote turns failed:\n${data.importError}\n\nThe conversation itself is intact in Claude's own session history.`);
+    handoffCardEl.hidden = true;
+    handoffCardEl.innerHTML = "";
+    delete handoffCardEl.dataset.key;
+    setComposerEnabled(true);
+    await refreshPersonas();
+    await loadMessages();
+  });
+}
+
+handoffBtnEl.addEventListener("click", async () => {
+  if (!activePersonaId) return;
+  handoffBtnEl.disabled = true;
+  handoffBtnEl.textContent = "📱 Handing off…";
+  try {
+    const res = await fetch(`/api/personas/${activePersonaId}/handoff`, { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) {
+      alert(`Handoff failed: ${data.error}`);
+      return;
+    }
+    await refreshPersonas();
+  } finally {
+    handoffBtnEl.disabled = false;
+    handoffBtnEl.textContent = "📱 Hand off";
+  }
+});
 
 /**
  * Renders the pending permission/question request for the active persona as
@@ -663,6 +756,13 @@ function connectStream(personaId) {
     } else if (evt.type === "blocked" || evt.type === "unblocked") {
       clearThinkingIndicator();
       refreshPersonas();
+    } else if (evt.type === "handoff") {
+      // Handoff started or reclaimed (possibly from another tab) - re-sync
+      // the card/composer, and on reclaim reload history so the imported
+      // remote turns appear.
+      refreshPersonas().then(() => {
+        if (evt.state === "reclaimed") loadMessages();
+      });
     }
   };
 }
@@ -675,10 +775,13 @@ async function selectPersona(p) {
   // that's still streaming.
   if (p.id === activePersonaId) return;
   activePersonaId = p.id;
-  chatHeaderEl.textContent = `${p.name} — ${modelLabel(p)} — ${workspaceLabel(p)}`;
-  chatTextEl.disabled = false;
-  chatAttachBtnEl.disabled = false;
-  document.getElementById("chat-send-btn").disabled = false;
+  chatHeaderTextEl.textContent = `${p.name} — ${modelLabel(p)} — ${workspaceLabel(p)}`;
+  // Force the handoff card to re-render for the newly selected persona even
+  // if its cache key happens to match the previous persona's.
+  delete handoffCardEl.dataset.key;
+  handoffCardEl.hidden = true;
+  handoffCardEl.innerHTML = "";
+  setComposerEnabled(!p.handoff);
   stagedAttachments = [];
   renderStagedAttachments();
   connectStream(p.id);
@@ -702,7 +805,7 @@ async function loadMessages() {
   streamingBubble = null;
   for (const m of messages) {
     const div = document.createElement("div");
-    div.className = `msg ${m.role}` + (m.blocked ? " blocked" : "");
+    div.className = `msg ${m.role}` + (m.blocked ? " blocked" : "") + (m.viaRemote ? " via-remote" : "");
     ensureMsgTextEl(div).textContent = m.text;
     renderAttachments(div, m.attachments, activePersonaId);
     if (!m.pending) {
@@ -710,6 +813,12 @@ async function loadMessages() {
       if (toggle) div.appendChild(toggle);
       const costCaption = buildCostCaption(m.costUsd, m.usage);
       if (costCaption) div.appendChild(costCaption);
+      if (m.viaRemote) {
+        const caption = document.createElement("div");
+        caption.className = "msg-cost";
+        caption.textContent = "via Remote Control";
+        div.appendChild(caption);
+      }
     } else {
       // Turn still in flight server-side - replay its tool calls so far into
       // the same live (running/done/error) view a fresh SSE "tool" event

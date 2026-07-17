@@ -75,6 +75,12 @@ export function toRecord(p) {
     sessionID: p.sessionID ?? p.id, // claude-code personas: sessionID === persona id
     permissionMode: p.permissionMode ?? null, // claude-code only; null = CLI's own default (currently "auto")
     lastActivityTs: p.lastActivityTs,
+    // Live Remote Control handoff state ({ url, pid, startedAt } or null) -
+    // persisted so a symposion restart doesn't orphan a handed-off persona:
+    // the detached claude process (and the phone session on it) survives our
+    // restart, and reclaim needs startedAt to know which transcript turns to
+    // import back.
+    handoff: p.handoff ?? null,
     messages: p.messages,
     lastDenials: p.lastDenials ?? [],
     totalCostUsd: p.totalCostUsd ?? 0,

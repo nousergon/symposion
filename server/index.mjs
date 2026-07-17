@@ -4,7 +4,9 @@ import os from "node:os";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { ClaudeCodeSession, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES } from "./claude-code-backend.mjs";
+import QRCode from "qrcode";
+import { ClaudeCodeSession, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, CLAUDE_BIN } from "./claude-code-backend.mjs";
+import { ensureWorkspaceTrusted, startRemoteControl, stopRemoteControl, isProcessAlive, importRemoteTurns } from "./remote-control.mjs";
 import { OpenCodeServerPool } from "./opencode-pool.mjs";
 import { loadPersonas, savePersonas, toRecord, saveAttachment, attachmentFilePath, ATTACHMENTS_DIR } from "./store.mjs";
 import { isGitRepo, createIsolatedWorktree, removeWorktreeAndBranch } from "./worktree.mjs";
@@ -147,6 +149,11 @@ async function connectApiPersona(persona, entry) {
 /** Lazily (re)connect a persona's backend process/session after a restart. */
 async function ensureConnected(persona) {
   if (persona.backend === "claude-code") {
+    // While handed off to Remote Control, the interactive claude process IS
+    // the session - respawning the -p subprocess here would put two live
+    // writers on the same session id. Hard-stop instead; callers that can
+    // tolerate a handed-off persona (the SSE stream route) check first.
+    if (persona.handoff) throw new Error("persona is handed off to Remote Control - reclaim it before messaging");
     if (persona.claudeSession && persona.claudeSession.alive) return;
     const resuming = persona.messages.length > 0;
     // Reconnect to the SAME worktree/cwd used originally - never re-derive
@@ -374,6 +381,12 @@ function personaSummary(p) {
     pendingQuestion: p.pendingQuestion ?? null,
     totalCostUsd: p.totalCostUsd ?? 0,
     totalUsage: p.totalUsage ?? null,
+    // alive is computed per-request (not stored) so a remote-control process
+    // that died on its own (phone session ended, reboot) shows up as such in
+    // the UI without any event plumbing from the detached process.
+    handoff: p.handoff
+      ? { url: p.handoff.url, startedAt: p.handoff.startedAt, alive: isProcessAlive(p.handoff.pid) }
+      : null,
   };
 }
 
@@ -567,7 +580,10 @@ app.get("/api/personas/:id/stream", async (req, res) => {
   // personas, reconcile any permission/question left pending from before a
   // server restart) now rather than staying lazy until the next message,
   // otherwise a persona blocked before a crash shows blocked:false forever.
-  await ensureConnected(persona);
+  // A handed-off persona deliberately skips connecting (its live session is
+  // the Remote Control process, not ours) but still gets the SSE
+  // subscription so the reclaim event reaches this client.
+  if (!persona.handoff) await ensureConnected(persona);
   hub.subscribe(persona.id, res);
 });
 
@@ -583,6 +599,10 @@ app.delete("/api/personas/:id", async (req, res) => {
 
   if (persona.backend === "claude-code") {
     persona.claudeSession?.kill();
+    // A handed-off persona's live process is the detached remote-control
+    // pair, not claudeSession - kill it too or deleting the persona would
+    // leave a phone-controllable session running in a just-removed worktree.
+    if (persona.handoff) stopRemoteControl(persona.handoff.pid);
     if (persona.isolated) {
       removeWorktreeAndBranch(persona.workspaceDir, persona.actualCwd, persona.worktreeBranch);
     }
@@ -631,6 +651,9 @@ app.post("/api/personas/:id/messages", async (req, res) => {
   if (!persona) return res.status(404).json({ error: "not found" });
   const { text, attachments: rawAttachments } = req.body ?? {};
   if (!text && !(rawAttachments?.length > 0)) return res.status(400).json({ error: "text or attachments required" });
+  if (persona.handoff) {
+    return res.status(409).json({ error: "persona is handed off to Remote Control - reclaim it before messaging from here" });
+  }
 
   // rawAttachments (from the client) carries the base64 payload itself -
   // that's what the backend adapters need to build content blocks for THIS
@@ -748,6 +771,114 @@ app.get("/api/personas/:id/attachments/:attachmentId", (req, res) => {
   // attachment. Scoping to `root` means only the relative `personaId/id`
   // portion is checked, and both are plain UUIDs - never dotted.
   res.sendFile(path.join(persona.id, meta.id), { root: ATTACHMENTS_DIR });
+});
+
+/**
+ * Hands a claude-code persona's session off to Anthropic's Remote Control:
+ * kills our own -p subprocess (single-writer rule - the interactive process
+ * about to spawn takes over the session id), marks the worktree trusted
+ * (interactive mode enforces the workspace-trust gate that -p skips), and
+ * spawns `claude --resume <id> --remote-control` under a pty, resolving with
+ * the claude.ai URL to continue the session from the Claude mobile/web apps.
+ * Idempotent: a second call while already handed off (and the process still
+ * alive) just returns the existing URL.
+ */
+app.post("/api/personas/:id/handoff", async (req, res) => {
+  const persona = personas.get(req.params.id);
+  if (!persona) return res.status(404).json({ error: "not found" });
+  if (persona.backend !== "claude-code") {
+    return res.status(400).json({ error: "only claude-code personas can be handed off to Remote Control" });
+  }
+  if (persona.pendingTurn) {
+    return res.status(409).json({ error: "a turn is still in flight - wait for it to finish before handing off" });
+  }
+  if (persona.handoff) {
+    if (isProcessAlive(persona.handoff.pid)) {
+      return res.json({ handoff: personaSummary(persona).handoff });
+    }
+    // Process died while handed off (phone session ended, reboot) - treat as
+    // a fresh handoff but KEEP the original startedAt so the turns from the
+    // dead handoff still get imported at the eventual reclaim.
+    stopRemoteControl(persona.handoff.pid);
+  }
+
+  try {
+    const priorStartedAt = persona.handoff?.startedAt;
+    persona.claudeSession?.kill();
+    persona.claudeSession = null;
+    ensureWorkspaceTrusted(persona.actualCwd);
+    const { pid, url } = await startRemoteControl({
+      claudeBin: CLAUDE_BIN,
+      sessionId: persona.id,
+      cwd: persona.actualCwd,
+      model: persona.modelID,
+      personaName: persona.name,
+      permissionMode: persona.permissionMode,
+    });
+    persona.handoff = { url, pid, startedAt: priorStartedAt ?? Date.now() };
+    persistAll();
+    hub.publish(persona.id, { type: "handoff", state: "active", handoff: personaSummary(persona).handoff });
+    res.json({ handoff: personaSummary(persona).handoff });
+  } catch (err) {
+    console.error(`[handoff:${persona.id}]`, err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+/**
+ * Reclaims a handed-off persona: stops the remote-control process, imports
+ * the turns that happened remotely from the on-disk transcript into
+ * symposion's own message history, and clears the handoff - the next message
+ * (or stream open) lazily respawns the normal -p subprocess via
+ * ensureConnected, which --resumes the same session including everything
+ * done from the phone.
+ */
+app.post("/api/personas/:id/reclaim", async (req, res) => {
+  const persona = personas.get(req.params.id);
+  if (!persona) return res.status(404).json({ error: "not found" });
+  if (!persona.handoff) return res.status(400).json({ error: "persona is not handed off" });
+
+  stopRemoteControl(persona.handoff.pid);
+
+  let imported = [];
+  let importError = null;
+  try {
+    imported = importRemoteTurns(persona.actualCwd, persona.id, persona.handoff.startedAt);
+  } catch (err) {
+    // Swallowed (recorded here + surfaced in the response) rather than
+    // re-thrown: failing the whole reclaim would strand the persona in
+    // handed-off state with its process already killed - unusable from both
+    // sides. The conversation itself is safe either way: claude's own
+    // transcript still has every turn, only symposion's chat view is missing
+    // the remote ones.
+    console.error(`[reclaim:${persona.id}] transcript import failed:`, err);
+    importError = String(err);
+  }
+  persona.messages.push(...imported);
+  persona.handoff = null;
+  if (imported.length > 0) persona.lastActivityTs = Date.now();
+  persistAll();
+  hub.publish(persona.id, { type: "handoff", state: "reclaimed", importedCount: imported.length });
+  res.json({ persona: personaSummary(persona), importedCount: imported.length, importError });
+});
+
+/**
+ * QR code (PNG) for the active handoff's URL, so "continue on your phone" is
+ * a camera point, not a URL retype. Rendered server-side to keep the
+ * frontend dependency-free.
+ */
+app.get("/api/personas/:id/handoff-qr", async (req, res) => {
+  const persona = personas.get(req.params.id);
+  if (!persona) return res.status(404).json({ error: "not found" });
+  if (!persona.handoff) return res.status(404).json({ error: "persona is not handed off" });
+  try {
+    const png = await QRCode.toBuffer(persona.handoff.url, { type: "png", width: 220, margin: 1 });
+    res.setHeader("Content-Type", "image/png");
+    res.send(png);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err) });
+  }
 });
 
 /**
