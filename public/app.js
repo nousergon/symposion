@@ -854,6 +854,7 @@ function populateModelSelect() {
         const opt = document.createElement("option");
         opt.value = m.modelID;
         opt.textContent = m.name;
+        opt.dataset.providerId = p.providerID;
         group.appendChild(opt);
       }
       modalModelEl.appendChild(group);
@@ -992,7 +993,7 @@ modalCreateEl.addEventListener("click", async () => {
   const workspaceDir = modalWorkspaceEl.value;
 
   const body = { name, backend: selectedBackend, modelID, workspaceDir };
-  if (selectedBackend === "api") body.providerID = "opencode";
+  if (selectedBackend === "api") body.providerID = modalModelEl.selectedOptions[0]?.dataset.providerId;
   else if (modalPermissionModeEl.value) body.permissionMode = modalPermissionModeEl.value;
 
   const res = await fetch("/api/personas", {
