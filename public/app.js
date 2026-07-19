@@ -20,6 +20,7 @@ const chatFormEl = document.getElementById("chat-form");
 const chatTextEl = document.getElementById("chat-text");
 const chatFileInputEl = document.getElementById("chat-file-input");
 const chatAttachBtnEl = document.getElementById("chat-attach-btn");
+const chatMicBtnEl = document.getElementById("chat-mic-btn");
 const stagedAttachmentsEl = document.getElementById("staged-attachments");
 const newAgentBtn = document.getElementById("new-agent-btn");
 const restartServerBtn = document.getElementById("restart-server-btn");
@@ -150,6 +151,8 @@ async function deletePersona(p) {
     chatMessagesEl.innerHTML = "";
     chatTextEl.disabled = true;
     chatAttachBtnEl.disabled = true;
+    chatMicBtnEl.disabled = true;
+    stopDictation();
     document.getElementById("chat-send-btn").disabled = true;
     stagedAttachments = [];
     renderStagedAttachments();
@@ -172,8 +175,10 @@ async function refreshPersonas() {
 function setComposerEnabled(enabled) {
   chatTextEl.disabled = !enabled;
   chatAttachBtnEl.disabled = !enabled;
+  chatMicBtnEl.disabled = !enabled;
   document.getElementById("chat-send-btn").disabled = !enabled;
   chatTextEl.placeholder = enabled ? "Message this agent..." : "Handed off to Remote Control - reclaim to message from here";
+  if (!enabled) stopDictation();
 }
 
 /**
@@ -1023,8 +1028,65 @@ chatMessagesEl.addEventListener("drop", (e) => {
   if (e.dataTransfer.files.length) addFilesToStaged(e.dataTransfer.files);
 });
 
+/**
+ * Speech-to-text dictation for the composer, via the browser's native
+ * SpeechRecognition (Web Speech API) - client-side only, no server round
+ * trip. Chrome/Edge support it; Safari/Firefox don't expose the
+ * constructor, so the mic button stays hidden there rather than showing a
+ * control that would just fail silently on click.
+ */
+const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognizer = null;
+let dictationBaseText = "";
+
+function stopDictation() {
+  if (recognizer) recognizer.stop();
+}
+
+function startDictation() {
+  dictationBaseText = chatTextEl.value.trim();
+  recognizer = new SpeechRecognitionCtor();
+  recognizer.lang = navigator.language || "en-US";
+  recognizer.continuous = true;
+  recognizer.interimResults = true;
+
+  recognizer.onstart = () => chatMicBtnEl.classList.add("recording");
+
+  recognizer.onresult = (event) => {
+    let finalText = "";
+    let interimText = "";
+    for (let i = 0; i < event.results.length; i++) {
+      const result = event.results[i];
+      if (result.isFinal) finalText += result[0].transcript;
+      else interimText += result[0].transcript;
+    }
+    const prefix = dictationBaseText ? `${dictationBaseText} ` : "";
+    chatTextEl.value = `${prefix}${finalText}${interimText}`;
+  };
+
+  recognizer.onerror = () => stopDictation();
+
+  recognizer.onend = () => {
+    chatMicBtnEl.classList.remove("recording");
+    dictationBaseText = chatTextEl.value.trim();
+    recognizer = null;
+    chatTextEl.focus();
+  };
+
+  recognizer.start();
+}
+
+if (SpeechRecognitionCtor) {
+  chatMicBtnEl.hidden = false;
+  chatMicBtnEl.addEventListener("click", () => {
+    if (recognizer) stopDictation();
+    else startDictation();
+  });
+}
+
 chatFormEl.addEventListener("submit", async (e) => {
   e.preventDefault();
+  stopDictation();
   const text = chatTextEl.value.trim();
   if ((!text && stagedAttachments.length === 0) || !activePersonaId) return;
   chatTextEl.value = "";

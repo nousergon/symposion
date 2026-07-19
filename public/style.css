@@ -306,6 +306,11 @@ body {
   border-radius: 8px; padding: 10px 12px; cursor: pointer; font-size: 15px; line-height: 1;
 }
 .attach-btn:hover:not(:disabled) { background: #3a3a3c; }
+.attach-btn.recording { background: #ff453a; color: #fff; border-color: #ff453a; animation: mic-pulse 1.2s ease-in-out infinite; }
+@keyframes mic-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
 
 .staged-attachments {
   display: flex; flex-wrap: wrap; gap: 6px; padding: 0 14px 10px 14px;
