@@ -12,26 +12,43 @@ import { loadPersonas, savePersonas, toRecord, saveAttachment, attachmentFilePat
 import { isGitRepo, createIsolatedWorktree, removeWorktreeAndBranch } from "./worktree.mjs";
 import { SseHub } from "./sse-hub.mjs";
 import { resolveSecret } from "./secrets.mjs";
-import { ensureDeepseekProxy } from "./deepseek-proxy.mjs";
+import { ensureEgressProxy } from "./llm-egress-proxy.mjs";
 
 const hub = new SseHub();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEV_ROOT = path.join(os.homedir(), "Development");
 
-// Resolved once at startup (env override, else SSM /symposion/DEEPSEEK_API_KEY)
-// and handed ONLY to the local content-scanning egress proxy (deepseek-
-// proxy.mjs), never to symposion's own process.env or an `opencode serve`
-// child's env - OpenCode's "deepseek" provider config points at that local
-// proxy with a placeholder key instead, so the real key never reaches an
-// unscanned outbound request (symposion#6; see deepseek-proxy.mjs and
-// ~/Development/.llm-routing/deepseek_egress_proxy.py for why this proxy
-// exists at all). Missing key, or the proxy failing to come up, just means
-// the real-account deepseek provider silently doesn't work - not
-// startup-fatal, since the free opencode-zen proxy still works either way.
-const deepseekKey = await resolveSecret("DEEPSEEK_API_KEY");
-if (deepseekKey) await ensureDeepseekProxy(deepseekKey);
-else console.warn("[secrets] DEEPSEEK_API_KEY not found (env or SSM) - real DeepSeek account provider will not be available");
+// Every direct-API provider (i.e. every OpenCode provider that isn't the
+// free OpenCode Zen proxy) gets its own local content-scanning egress proxy
+// instance (llm-egress-proxy.mjs / ~/Development/.llm-routing/llm_egress_
+// proxy.py) instead of talking to the real upstream directly. Ports are
+// assigned here and must stay stable across restarts (OpenCode's own
+// provider config, ~/.config/opencode/opencode.jsonc, machine-local, points
+// each provider's baseURL at the matching port with a placeholder apiKey -
+// see llm-egress-proxy.mjs's module doc). deepseek=8972 predates this map
+// (symposion#6); xai=8973 added 2026-07-19 when a real xAI account was
+// wired up the same way, generalizing what used to be a DeepSeek-only path.
+const EGRESS_PROXY_PROVIDERS = {
+  deepseek: { port: 8972, upstreamHost: "api.deepseek.com", apiKeyEnv: "DEEPSEEK_API_KEY", upstreamPrefix: "" },
+  xai: { port: 8973, upstreamHost: "api.x.ai", apiKeyEnv: "XAI_API_KEY", upstreamPrefix: "" },
+};
+
+// Resolved once at startup (env override, else SSM /symposion/{KEY}) and
+// handed ONLY to the corresponding local egress proxy process, never to
+// symposion's own process.env or an `opencode serve` child's env - the
+// real key never reaches an unscanned outbound request (symposion#6,
+// generalized to non-DeepSeek providers 2026-07-19). Missing key, or the
+// proxy failing to come up, just means that provider silently doesn't
+// work - not startup-fatal, since the free opencode-zen proxy still works
+// either way.
+const providerKeys = {};
+for (const [providerId, cfg] of Object.entries(EGRESS_PROXY_PROVIDERS)) {
+  const key = await resolveSecret(cfg.apiKeyEnv);
+  providerKeys[providerId] = key;
+  if (key) await ensureEgressProxy({ providerId, apiKey: key, ...cfg });
+  else console.warn(`[secrets] ${cfg.apiKeyEnv} not found (env or SSM) - real ${providerId} account provider will not be available`);
+}
 
 const pool = new OpenCodeServerPool();
 
@@ -161,17 +178,18 @@ async function ensureConnected(persona) {
     // worktree+branch for the same persona.
     persona.claudeSession = new ClaudeCodeSession(persona.id, persona.modelID, persona.name, persona.actualCwd, resuming, persona.permissionMode);
   } else {
-    // Runs on every call, not just first-connect: the deepseek egress
-    // proxy is a separate process from the opencode pool entry below, so it
-    // can die independently AFTER a persona is already connected (verified
-    // live, symposion#24 - a manually-killed proxy left every subsequent
-    // message to a "deepseek"-provider persona hanging forever with no
-    // error surfaced, since ensureDeepseekProxy() previously only ran once
-    // at server startup). ensureDeepseekProxy() itself is a cheap
+    // Runs on every call, not just first-connect: an egress proxy is a
+    // separate process from the opencode pool entry below, so it can die
+    // independently AFTER a persona is already connected (verified live,
+    // symposion#24 - a manually-killed proxy left every subsequent message
+    // to a "deepseek"-provider persona hanging forever with no error
+    // surfaced, since ensureEgressProxy() previously only ran once at
+    // server startup). ensureEgressProxy() itself is a cheap
     // health-check-first, spawn-if-not-running call - negligible cost when
     // the proxy's already healthy, the common case.
-    if (persona.providerID === "deepseek" && deepseekKey) {
-      await ensureDeepseekProxy(deepseekKey);
+    const egressProxyCfg = EGRESS_PROXY_PROVIDERS[persona.providerID];
+    if (egressProxyCfg && providerKeys[persona.providerID]) {
+      await ensureEgressProxy({ providerId: persona.providerID, apiKey: providerKeys[persona.providerID], ...egressProxyCfg });
     }
     if (persona.opencodeEntry) return;
     // Reconnect to the SAME worktree/cwd used originally, same as claude-code
