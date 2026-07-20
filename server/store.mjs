@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = path.join(__dirname, "..", "data");
 const DATA_FILE = path.join(DATA_DIR, "personas.json");
+const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 export const ATTACHMENTS_DIR = path.join(DATA_DIR, "attachments");
 
 // Simple whole-file JSON store. Single local user, low write frequency -
@@ -27,6 +28,29 @@ export function loadPersonas() {
 export function savePersonas(personaRecords) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(DATA_FILE, JSON.stringify(personaRecords, null, 2));
+}
+
+/**
+ * Small whole-file JSON store for singleton app settings (currently just
+ * lastRecipe - the backend/provider/model/permissionMode of the most
+ * recently created persona, used to prefill the New Agent modal instead of
+ * always resetting to the hardcoded CLAUDE_CODE_DEFAULT/API_DEFAULT).
+ * Deliberately separate from personas.json since its shape and write
+ * frequency are unrelated to the persona roster.
+ */
+export function loadSettings() {
+  if (!fs.existsSync(SETTINGS_FILE)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
+  } catch (err) {
+    console.error("[store] failed to read settings.json, starting empty:", err);
+    return {};
+  }
+}
+
+export function saveSettings(settings) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
 }
 
 /**

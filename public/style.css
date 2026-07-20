@@ -66,6 +66,14 @@ body {
 .ttl-dot.yellow { background: #ffd60a; }
 .ttl-dot.red { background: #ff453a; }
 .ttl-label { font-size: 10px; color: #9a9a9e; }
+.activity-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.activity-dot.idle { background: #5a5a5e; }
+.activity-dot.working { background: #0a84ff; animation: activity-pulse 1.2s ease-in-out infinite; }
+.activity-dot.blocked { background: #ff453a; }
+@keyframes activity-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
 
 .persona-delete, .persona-rename {
   background: none; border: none; color: #6a6a6e; font-size: 14px;

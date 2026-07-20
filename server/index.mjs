@@ -8,7 +8,7 @@ import QRCode from "qrcode";
 import { ClaudeCodeSession, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, CLAUDE_BIN } from "./claude-code-backend.mjs";
 import { ensureWorkspaceTrusted, startRemoteControl, stopRemoteControl, isProcessAlive, importRemoteTurns } from "./remote-control.mjs";
 import { OpenCodeServerPool } from "./opencode-pool.mjs";
-import { loadPersonas, savePersonas, toRecord, saveAttachment, attachmentFilePath, ATTACHMENTS_DIR } from "./store.mjs";
+import { loadPersonas, savePersonas, toRecord, saveAttachment, attachmentFilePath, ATTACHMENTS_DIR, loadSettings, saveSettings } from "./store.mjs";
 import { isGitRepo, createIsolatedWorktree, removeWorktreeAndBranch } from "./worktree.mjs";
 import { randomStarName } from "./star-names.mjs";
 import { SseHub } from "./sse-hub.mjs";
@@ -107,6 +107,13 @@ for (const record of loadPersonas()) {
   });
 }
 console.log(`[store] loaded ${personas.size} persona(s) from disk`);
+
+// Persisted server-side (not localStorage) so the "last recipe" default
+// survives a browser cache clear and is consistent across any device that
+// hits this box (e.g. phone via Remote Control) - not just the one browser
+// that happened to create the last persona.
+const settings = loadSettings();
+let lastRecipe = settings.lastRecipe ?? null;
 
 function normalizePermission(p) {
   return { id: p.id, action: p.permission, resources: p.patterns ?? [], metadata: p.metadata };
@@ -396,6 +403,7 @@ function personaSummary(p) {
     ttlApproximate: p.backend !== "claude-code",
     alive: p.backend === "claude-code" ? (p.claudeSession ? p.claudeSession.alive : true) : true,
     blocked: (p.lastDenials?.length ?? 0) > 0 || !!p.pendingPermission || !!p.pendingQuestion,
+    working: !!p.pendingTurn,
     pendingPermission: p.pendingPermission ?? null,
     pendingQuestion: p.pendingQuestion ?? null,
     totalCostUsd: p.totalCostUsd ?? 0,
@@ -467,7 +475,7 @@ app.get("/api/claude-permission-modes", (req, res) => {
 });
 
 app.get("/api/defaults", (req, res) => {
-  res.json({ apiDefault: API_DEFAULT, claudeCodeDefault: CLAUDE_CODE_DEFAULT, defaultWorkspace: DEFAULT_WORKSPACE });
+  res.json({ apiDefault: API_DEFAULT, claudeCodeDefault: CLAUDE_CODE_DEFAULT, defaultWorkspace: DEFAULT_WORKSPACE, lastRecipe });
 });
 
 /**
@@ -596,6 +604,15 @@ app.post("/api/personas", async (req, res) => {
 
     personas.set(persona.id, persona);
     persistAll();
+
+    // Remember this recipe as the New Agent modal's next default (workspace
+    // deliberately excluded - each new agent is typically for a different
+    // repo, so carrying it forward would be a wrong-more-often-than-right
+    // default rather than a helpful one).
+    lastRecipe = { backend, providerID: providerID ?? null, modelID, permissionMode: permissionMode ?? null };
+    settings.lastRecipe = lastRecipe;
+    saveSettings(settings);
+
     res.status(201).json(personaSummary(persona));
   } catch (err) {
     console.error(err);
