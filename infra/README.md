@@ -47,6 +47,40 @@ rm ~/Library/LaunchAgents/com.nousergon.symposion.plist
 tail -f ~/Library/Logs/symposion.log ~/Library/Logs/symposion.err.log
 ```
 
+# Auto-update on merge (macOS launchd)
+
+`com.nousergon.symposion-autoupdate.plist` + `auto-update.sh` close the loop between "a PR merges on GitHub" and "the running local server actually serves that code." Without this, a merged PR sits unpicked-up until someone remembers to `git pull` + `launchctl kickstart` (the manual step that caused the New Agent button to hang unresponsive on 2026-07-20 - the running process predated the merge that added the `/api/random-name` route it now depends on).
+
+Runs every 5 minutes via `StartInterval` (not a filesystem watcher - a commit landing on `origin/main` is the real deploy signal here, not a local file edit, and a watcher would restart mid-edit during active development on this same checkout). Each run:
+
+1. Skips if not on `main`, or if the working tree is dirty (this checkout doubles as the dev checkout - never clobbers in-progress work).
+2. `git fetch origin main`; skips if already up to date.
+3. Fast-forwards (`git merge --ff-only`) - never rewrites history, never touches a diverged branch.
+4. Runs `npm ci` if `package-lock.json` changed in the pulled range.
+5. `launchctl kickstart -k` the main server LaunchAgent to pick up the new code.
+
+## Install
+
+```
+ln -sf ~/Development/symposion/infra/com.nousergon.symposion-autoupdate.plist ~/Library/LaunchAgents/com.nousergon.symposion-autoupdate.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.nousergon.symposion-autoupdate.plist
+```
+
+Requires the main `com.nousergon.symposion` LaunchAgent above already installed (this one only kickstarts it, doesn't start it standalone).
+
+## Uninstall
+
+```
+launchctl bootout gui/$(id -u)/com.nousergon.symposion-autoupdate
+rm ~/Library/LaunchAgents/com.nousergon.symposion-autoupdate.plist
+```
+
+## Logs
+
+```
+tail -f ~/Library/Logs/symposion-autoupdate.log ~/Library/Logs/symposion-autoupdate.err.log
+```
+
 # Desktop launcher (macOS app)
 
 `Symposion.applescript` compiles into a real double-clickable/Dock-able `.app` that just opens `http://localhost:5173` in your default browser - no networking changes, stays entirely local. Deliberately NOT a tunnel/public-hosting setup - symposion depends on your local `claude`/`opencode` auth and your actual local repos, so it stays laptop-only; this just makes opening it a one-click action instead of remembering a URL.
