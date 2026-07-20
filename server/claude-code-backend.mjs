@@ -102,6 +102,17 @@ export class ClaudeCodeSession {
     this.queue = []; // pending {resolve, reject} for sendMessage calls, one at a time
     this.crashError = null;
 
+    // Settable by the caller (server/index.mjs) after construction - fires
+    // for turn-lifecycle events that arrive on this same long-lived process
+    // while `queue` is empty, i.e. NOT in response to a sendMessage() call
+    // symposion itself made. This happens when the CLI's own background-task
+    // machinery (an Agent-tool dispatch launched with run_in_background)
+    // delivers its completion as an unprompted new turn - previously these
+    // events were silently discarded (`pending?.onToolUpdate?.()` on
+    // undefined `pending`), so a detached subagent had zero visibility once
+    // the turn that launched it had already ended (symposion-I45).
+    this.onBackgroundEvent = null;
+
     // Without this, `personaName` is purely a UI label - the model itself
     // has no idea it's supposed to identify as that name and will (correctly)
     // deny it if asked. This makes the identity real, not just a sidebar label.
@@ -210,6 +221,9 @@ export class ClaudeCodeSession {
         }
         // "thinking" blocks intentionally skipped - chat-only view.
       }
+      // No sendMessage() call is waiting on this event - it's a
+      // background-originated turn (see onBackgroundEvent doc comment).
+      if (!pending) this.onBackgroundEvent?.({ status: "running", parts: this.currentParts });
       return;
     }
 
@@ -229,6 +243,7 @@ export class ClaudeCodeSession {
           }
         }
       }
+      if (!pending) this.onBackgroundEvent?.({ status: "running", parts: this.currentParts });
       return;
     }
 
@@ -256,6 +271,8 @@ export class ClaudeCodeSession {
               }
             : null,
         });
+      } else {
+        this.onBackgroundEvent?.({ status: "done", parts: this.currentParts });
       }
       this.currentParts = [];
     }

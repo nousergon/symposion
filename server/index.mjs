@@ -104,6 +104,7 @@ for (const record of loadPersonas()) {
     pendingPermission: null,
     pendingQuestion: null,
     pendingTurn: null,
+    backgroundTask: null,
   });
 }
 console.log(`[store] loaded ${personas.size} persona(s) from disk`);
@@ -171,6 +172,21 @@ async function connectApiPersona(persona, entry) {
   if (ques) persona.pendingQuestion = normalizeQuestion(ques);
 }
 
+/**
+ * Wires a freshly-constructed ClaudeCodeSession's onBackgroundEvent callback
+ * to this persona's backgroundTask state + SSE stream. Must be called every
+ * time a new ClaudeCodeSession is constructed (both call sites: fresh
+ * persona creation, and ensureConnected's reconnect-after-restart path) -
+ * the session itself has no persona reference to self-wire.
+ */
+function wireBackgroundEvents(persona) {
+  persona.claudeSession.onBackgroundEvent = ({ status, parts }) => {
+    persona.backgroundTask =
+      status === "done" ? null : { parts, startedAt: persona.backgroundTask?.startedAt ?? Date.now() };
+    hub.publish(persona.id, { type: "background", status, parts });
+  };
+}
+
 /** Lazily (re)connect a persona's backend process/session after a restart. */
 async function ensureConnected(persona) {
   if (persona.backend === "claude-code") {
@@ -185,6 +201,7 @@ async function ensureConnected(persona) {
     // or re-create one on reconnect, or every restart would leak a new
     // worktree+branch for the same persona.
     persona.claudeSession = new ClaudeCodeSession(persona.id, persona.modelID, persona.name, persona.actualCwd, resuming, persona.permissionMode);
+    wireBackgroundEvents(persona);
   } else {
     // Runs on every call, not just first-connect: an egress proxy is a
     // separate process from the opencode pool entry below, so it can die
@@ -404,6 +421,12 @@ function personaSummary(p) {
     alive: p.backend === "claude-code" ? (p.claudeSession ? p.claudeSession.alive : true) : true,
     blocked: (p.lastDenials?.length ?? 0) > 0 || !!p.pendingPermission || !!p.pendingQuestion,
     working: !!p.pendingTurn,
+    // Distinct from `working` (foreground pendingTurn): true when a detached
+    // background dispatch (e.g. a run_in_background Agent-tool subagent) is
+    // still running after the turn that launched it already ended - see
+    // wireBackgroundEvents/ClaudeCodeSession.onBackgroundEvent (symposion-I45).
+    backgroundActive: !!p.backgroundTask,
+    backgroundParts: p.backgroundTask?.parts ?? null,
     pendingPermission: p.pendingPermission ?? null,
     pendingQuestion: p.pendingQuestion ?? null,
     totalCostUsd: p.totalCostUsd ?? 0,
@@ -571,6 +594,11 @@ app.post("/api/personas", async (req, res) => {
         pendingPermission: null,
         pendingQuestion: null,
         pendingTurn: null,
+        // OpenCode has no run_in_background primitive today (confirmed -
+        // its only detached-dispatch shape is "subtask", which PR31 already
+        // renders within an active prompt's own event stream) - stays null
+        // forever on this backend, never wired to a background-event source.
+        backgroundTask: null,
       };
       await connectApiPersona(persona, entry);
     } else {
@@ -599,7 +627,9 @@ app.post("/api/personas", async (req, res) => {
         messages: [],
         lastDenials: [],
         pendingTurn: null,
+        backgroundTask: null,
       };
+      wireBackgroundEvents(persona);
     }
 
     personas.set(persona.id, persona);
