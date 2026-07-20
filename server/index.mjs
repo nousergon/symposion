@@ -10,6 +10,7 @@ import { ensureWorkspaceTrusted, startRemoteControl, stopRemoteControl, isProces
 import { OpenCodeServerPool } from "./opencode-pool.mjs";
 import { loadPersonas, savePersonas, toRecord, saveAttachment, attachmentFilePath, ATTACHMENTS_DIR } from "./store.mjs";
 import { isGitRepo, createIsolatedWorktree, removeWorktreeAndBranch } from "./worktree.mjs";
+import { randomStarName } from "./star-names.mjs";
 import { SseHub } from "./sse-hub.mjs";
 import { resolveSecret } from "./secrets.mjs";
 import { ensureEgressProxy } from "./llm-egress-proxy.mjs";
@@ -470,6 +471,15 @@ app.get("/api/defaults", (req, res) => {
 });
 
 /**
+ * A fresh random star name, excluding names already in use by a live
+ * persona - backs the "New Agent" modal's auto-filled name field and its
+ * dice/regenerate button, so nobody has to type a name to create a persona.
+ */
+app.get("/api/random-name", (req, res) => {
+  res.json({ name: randomStarName([...personas.values()].map((p) => p.name)) });
+});
+
+/**
  * Restarts the server process in place, so a UI button can pick up a fresh
  * `git pull` without needing Activity Monitor / launchctl. Relies entirely
  * on the LaunchAgent's KeepAlive:true (com.nousergon.symposion.plist) to
@@ -497,9 +507,11 @@ function resolveWorkspaceDir(raw) {
 
 app.post("/api/personas", async (req, res) => {
   try {
-    const { name, backend, providerID, modelID, permissionMode } = req.body ?? {};
+    const { backend, providerID, modelID, permissionMode } = req.body ?? {};
+    // A name is never required to create a persona - an untyped/blank field
+    // just gets a random star name, excluding whatever's already in use.
+    const name = (req.body?.name ?? "").trim() || randomStarName([...personas.values()].map((p) => p.name));
     const workspaceDir = resolveWorkspaceDir(req.body?.workspaceDir);
-    if (!name) return res.status(400).json({ error: "name is required" });
     if (backend !== "api" && backend !== "claude-code") {
       return res.status(400).json({ error: 'backend must be "api" or "claude-code"' });
     }
@@ -639,6 +651,39 @@ app.delete("/api/personas/:id", async (req, res) => {
   personas.delete(persona.id);
   persistAll();
   res.status(204).end();
+});
+
+/**
+ * Renames a persona - possible at any time, not just at creation. Cosmetic
+ * everywhere (sidebar/header/storage) update immediately here. Identity
+ * (the model's own belief about its name) updates on different timelines per
+ * backend: an api-backend (OpenCode) persona resends its system prompt fresh
+ * on every single message (see promptOpenCodeStreaming's `system:` line
+ * below), so it picks up the new name on the very next turn; a claude-code
+ * persona's identity is baked into --append-system-prompt once at process
+ * spawn (claude-code-backend.mjs), so it only self-identifies under the new
+ * name after its next reconnect/resume - respawning it here to force an
+ * immediate update would kill whatever turn might be in flight.
+ */
+app.patch("/api/personas/:id", async (req, res) => {
+  const persona = personas.get(req.params.id);
+  if (!persona) return res.status(404).json({ error: "not found" });
+  const name = (req.body?.name ?? "").trim();
+  if (!name) return res.status(400).json({ error: "name is required" });
+
+  persona.name = name;
+  persistAll();
+
+  if (persona.backend === "api" && persona.opencodeEntry) {
+    try {
+      await persona.opencodeEntry.client.session.update({ path: { id: persona.sessionID }, body: { title: name } });
+    } catch (err) {
+      console.error(`[rename:${persona.id}] failed to update OpenCode session title:`, err.message);
+    }
+  }
+
+  hub.publish(persona.id, { type: "renamed", name });
+  res.json(personaSummary(persona));
 });
 
 /**

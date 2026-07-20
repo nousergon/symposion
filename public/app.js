@@ -25,9 +25,11 @@ const stagedAttachmentsEl = document.getElementById("staged-attachments");
 const newAgentBtn = document.getElementById("new-agent-btn");
 const restartServerBtn = document.getElementById("restart-server-btn");
 const blockedCardEl = document.getElementById("blocked-card");
+const renameBtnEl = document.getElementById("rename-btn");
 
 const modalEl = document.getElementById("new-agent-modal");
 const modalNameEl = document.getElementById("new-agent-name");
+const modalRandomizeNameEl = document.getElementById("new-agent-randomize-name");
 const modalModelEl = document.getElementById("new-agent-model");
 const modalCancelEl = document.getElementById("new-agent-cancel");
 const modalCreateEl = document.getElementById("new-agent-create");
@@ -66,6 +68,12 @@ async function fetchPermissionModes() {
 async function fetchDefaults() {
   const res = await fetch("/api/defaults");
   return res.json();
+}
+
+async function fetchRandomName() {
+  const res = await fetch("/api/random-name");
+  const data = await res.json();
+  return data.name;
 }
 
 async function fetchBrowseDir(dirPath) {
@@ -125,15 +133,40 @@ function renderPersonaList(personas) {
         <span class="persona-model">${modelLabel(p)} · ${workspaceLabel(p)}${costLabel(p.totalCostUsd) ? ` · ${costLabel(p.totalCostUsd)}` : ""}</span>
       </span>
       <span class="ttl-label" title="${p.ttlApproximate ? "Approximate - real cache window unknown for this provider" : "Confirmed 1-hour ephemeral cache window"}">${ttlLabel(p)}</span>
+      <button type="button" class="persona-rename" title="Rename agent" data-id="${p.id}">✎</button>
       <button type="button" class="persona-delete" title="Delete agent" data-id="${p.id}">×</button>
     `;
     li.addEventListener("click", () => selectPersona(p));
+    li.querySelector(".persona-rename").addEventListener("click", (e) => {
+      e.stopPropagation();
+      renamePersona(p);
+    });
     li.querySelector(".persona-delete").addEventListener("click", (e) => {
       e.stopPropagation();
       deletePersona(p);
     });
     personaListEl.appendChild(li);
   }
+}
+
+/** Rename is possible at any time, not just at creation - prompt() mirrors the existing confirm()-based delete flow rather than adding a whole inline-edit UI for one text field. */
+async function renamePersona(p) {
+  const next = prompt("Rename agent:", p.name);
+  if (next === null) return;
+  const name = next.trim();
+  if (!name || name === p.name) return;
+
+  const res = await fetch(`/api/personas/${p.id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) {
+    const data = await res.json();
+    alert(`Rename failed: ${data.error}`);
+    return;
+  }
+  await refreshPersonas();
 }
 
 async function deletePersona(p) {
@@ -145,6 +178,7 @@ async function deletePersona(p) {
     activePersonaId = null;
     if (activeStream) { activeStream.close(); activeStream = null; }
     chatHeaderTextEl.textContent = "Select or create an agent to begin";
+    renameBtnEl.hidden = true;
     handoffBtnEl.hidden = true;
     handoffCardEl.hidden = true;
     handoffCardEl.innerHTML = "";
@@ -168,6 +202,10 @@ async function refreshPersonas() {
   const active = personas.find((p) => p.id === activePersonaId);
   renderBlockedCard(active);
   renderHandoffState(active);
+  // Keeps the header text (which includes the name) in sync with a rename -
+  // whether it happened in this tab just now, or another tab within the last
+  // poll interval - without a dedicated "renamed" re-render path.
+  if (active) chatHeaderTextEl.textContent = `${active.name} — ${modelLabel(active)} — ${workspaceLabel(active)}`;
   return personas;
 }
 
@@ -240,6 +278,11 @@ function renderHandoffState(persona) {
     await loadMessages();
   });
 }
+
+renameBtnEl.addEventListener("click", () => {
+  const active = latestPersonas.find((p) => p.id === activePersonaId);
+  if (active) renamePersona(active);
+});
 
 handoffBtnEl.addEventListener("click", async () => {
   if (!activePersonaId) return;
@@ -761,6 +804,11 @@ function connectStream(personaId) {
     } else if (evt.type === "blocked" || evt.type === "unblocked") {
       clearThinkingIndicator();
       refreshPersonas();
+    } else if (evt.type === "renamed") {
+      // A rename from another tab (or the persona-list rename button, which
+      // already refreshes itself) - re-sync the header/sidebar immediately
+      // instead of waiting for the 5s poll.
+      refreshPersonas();
     } else if (evt.type === "handoff") {
       // Handoff started or reclaimed (possibly from another tab) - re-sync
       // the card/composer, and on reclaim reload history so the imported
@@ -781,6 +829,7 @@ async function selectPersona(p) {
   if (p.id === activePersonaId) return;
   activePersonaId = p.id;
   chatHeaderTextEl.textContent = `${p.name} — ${modelLabel(p)} — ${workspaceLabel(p)}`;
+  renameBtnEl.hidden = false;
   // Force the handoff card to re-render for the newly selected persona even
   // if its cache key happens to match the previous persona's.
   delete handoffCardEl.dataset.key;
@@ -979,16 +1028,26 @@ newAgentBtn.addEventListener("click", async () => {
   populateModelSelect();
   populatePermissionModeSelect();
   modalWorkspaceEl.value = defaults?.defaultWorkspace ?? "";
-  modalNameEl.value = "";
+  // No name is ever required - prefill with a random star name (editable,
+  // and re-rollable via the dice button) rather than leaving it blank.
+  modalNameEl.value = await fetchRandomName();
   modalEl.hidden = false;
   modalNameEl.focus();
+  modalNameEl.select();
+});
+
+modalRandomizeNameEl.addEventListener("click", async () => {
+  modalNameEl.value = await fetchRandomName();
+  modalNameEl.focus();
+  modalNameEl.select();
 });
 
 modalCancelEl.addEventListener("click", () => { modalEl.hidden = true; });
 
 modalCreateEl.addEventListener("click", async () => {
+  // A blank name (user cleared the prefilled one) is fine - the server
+  // generates a random star name of its own when name is omitted.
   const name = modalNameEl.value.trim();
-  if (!name) return;
   const modelID = modalModelEl.value;
   const workspaceDir = modalWorkspaceEl.value;
 
