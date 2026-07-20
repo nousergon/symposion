@@ -19,7 +19,10 @@
     </aside>
     <main class="chat">
       <div class="chat-header" id="chat-header">
-        <span id="chat-header-text">Select or create an agent to begin</span>
+        <span class="chat-header-title">
+          <span id="chat-header-text">Select or create an agent to begin</span>
+          <button type="button" id="rename-btn" class="icon-btn" title="Rename this agent" hidden>✎</button>
+        </span>
         <button type="button" id="handoff-btn" class="handoff-btn" title="Hand this session off to Remote Control - continue it from the Claude mobile app or claude.ai/code" hidden>📱 Hand off</button>
       </div>
       <div class="chat-messages" id="chat-messages"></div>
@@ -40,7 +43,10 @@
     <div class="modal">
       <h3>New Agent</h3>
       <label>Name</label>
-      <input id="new-agent-name" type="text" placeholder="e.g. Scout" autocomplete="off" />
+      <div class="name-picker-row">
+        <input id="new-agent-name" type="text" placeholder="Random star name" autocomplete="off" />
+        <button type="button" id="new-agent-randomize-name" class="icon-btn" title="Pick a different random name">🎲</button>
+      </div>
       <label>Backend</label>
       <div class="backend-toggle">
         <button type="button" class="backend-btn active" data-backend="api">API</button>

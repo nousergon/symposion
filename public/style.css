@@ -67,13 +67,15 @@ body {
 .ttl-dot.red { background: #ff453a; }
 .ttl-label { font-size: 10px; color: #9a9a9e; }
 
-.persona-delete {
-  background: none; border: none; color: #6a6a6e; font-size: 16px;
+.persona-delete, .persona-rename {
+  background: none; border: none; color: #6a6a6e; font-size: 14px;
   line-height: 1; cursor: pointer; padding: 2px 6px; border-radius: 4px;
   visibility: hidden;
 }
-.persona-item:hover .persona-delete { visibility: visible; }
+.persona-delete { font-size: 16px; }
+.persona-item:hover .persona-delete, .persona-item:hover .persona-rename { visibility: visible; }
 .persona-delete:hover { color: #ff453a; background: #3a3a3c; }
+.persona-rename:hover { color: #eaeaea; background: #3a3a3c; }
 
 .chat { flex: 1; display: flex; flex-direction: column; }
 .chat-header {
@@ -86,6 +88,7 @@ body {
   justify-content: space-between;
   gap: 10px;
 }
+.chat-header-title { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
 #chat-header-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .handoff-btn {
   background: #3a3a3c; color: #fff; border: none; border-radius: 6px;
@@ -167,6 +170,10 @@ body {
   padding: 8px 12px; cursor: pointer; font-size: 12px; white-space: nowrap;
 }
 .workspace-picker-row button:hover { background: #48484a; }
+
+.name-picker-row { display: flex; gap: 6px; }
+.name-picker-row input { flex: 1; min-width: 0; }
+.name-picker-row .icon-btn { width: auto; padding: 0 10px; flex-shrink: 0; }
 
 .modal.dir-browser { width: 440px; }
 .dir-browser-path {
