@@ -25,6 +25,7 @@ const stagedAttachmentsEl = document.getElementById("staged-attachments");
 const newAgentBtn = document.getElementById("new-agent-btn");
 const restartServerBtn = document.getElementById("restart-server-btn");
 const blockedCardEl = document.getElementById("blocked-card");
+const backgroundCardEl = document.getElementById("background-task-card");
 const renameBtnEl = document.getElementById("rename-btn");
 
 const modalEl = document.getElementById("new-agent-modal");
@@ -130,6 +131,7 @@ function renderPersonaList(personas) {
     const activityTitle = { blocked: "Blocked - needs your input", working: "Working", idle: "Idle" }[activityState];
     li.innerHTML = `
       <span class="activity-dot ${activityState}" title="${activityTitle}"></span>
+      ${p.backgroundActive ? '<span class="background-dot" title="A background task is still running"></span>' : ""}
       <span class="ttl-dot ${p.ttlStatus}" title="${p.ttlApproximate ? "Approximate - real cache window unknown for this provider" : "Confirmed 1-hour ephemeral cache window"}"></span>
       <span class="persona-name-block">
         <span class="persona-name">${p.blocked ? '<span class="blocked-flag">⚠</span>' : ""}${p.handoff ? '<span class="handoff-flag" title="Handed off to Remote Control">📱</span>' : ""}${p.name}${p.alive ? "" : " (crashed)"}</span>
@@ -205,6 +207,7 @@ async function refreshPersonas() {
   const active = personas.find((p) => p.id === activePersonaId);
   renderBlockedCard(active);
   renderHandoffState(active);
+  renderBackgroundTaskCard(active);
   // Keeps the header text (which includes the name) in sync with a rename -
   // whether it happened in this tab just now, or another tab within the last
   // poll interval - without a dedicated "renamed" re-render path.
@@ -695,6 +698,51 @@ function clearLiveTools(bubble) {
   bubble._liveToolsTimer = null;
 }
 
+/**
+ * Bulk-replaces a container's live tool-call rows from a full parts snapshot
+ * (as opposed to upsertLiveToolPart's one-at-a-time merge) - used for the
+ * background-task card, which is fed either a full snapshot on every 5s
+ * persona poll or a full `this.currentParts` snapshot on each SSE
+ * `background` event, never a single incremental part. Preserves each row's
+ * `startedAt` across snapshots (keyed by toolUseId) so the elapsed timer in
+ * toolLiveLabel doesn't visibly reset on every poll/event.
+ */
+function syncBackgroundToolParts(container, parts) {
+  const prev = container._liveToolParts ?? [];
+  container._liveToolParts = (parts ?? [])
+    .filter((p) => p.type === "tool")
+    .map((p) => ({ ...p, startedAt: prev.find((e) => e.toolUseId === p.toolUseId)?.startedAt ?? Date.now() }));
+  renderLiveTools(container);
+  ensureLiveToolsTicker(container);
+}
+
+/**
+ * Persistent indicator for a detached background dispatch (e.g. a
+ * run_in_background Agent-tool subagent) that outlives the turn that
+ * launched it - previously invisible once that turn's final message
+ * rendered (symposion-I45). Modeled after renderHandoffState/renderBlockedCard:
+ * a dedicated card, hidden when there's nothing to show, re-synced on every
+ * refreshPersonas() poll and on the SSE `background` event for low latency
+ * while this persona's chat is the one currently open.
+ */
+function renderBackgroundTaskCard(persona) {
+  if (!persona?.backgroundActive) {
+    if (!backgroundCardEl.hidden) {
+      backgroundCardEl.hidden = true;
+      backgroundCardEl.innerHTML = "";
+      clearInterval(backgroundCardEl._liveToolsTimer);
+      backgroundCardEl._liveToolsTimer = null;
+      backgroundCardEl._liveToolParts = null;
+    }
+    return;
+  }
+  if (backgroundCardEl.hidden) {
+    backgroundCardEl.hidden = false;
+    backgroundCardEl.innerHTML = `<div class="background-card-title">⏳ Background task running</div>`;
+  }
+  syncBackgroundToolParts(backgroundCardEl, persona.backgroundParts);
+}
+
 function buildToolPartsToggle(parts) {
   const toolParts = (parts ?? []).filter((p) => p.type === "tool");
   if (toolParts.length === 0) return null;
@@ -812,6 +860,25 @@ function connectStream(personaId) {
       // already refreshes itself) - re-sync the header/sidebar immediately
       // instead of waiting for the 5s poll.
       refreshPersonas();
+    } else if (evt.type === "background") {
+      // Low-latency path while this persona's chat is the one currently
+      // open - the 5s refreshPersonas() poll would otherwise be the only
+      // thing keeping the card's tool list in sync. refreshPersonas() also
+      // updates the sidebar dot for this persona sooner than its next poll.
+      if (evt.status === "done") {
+        backgroundCardEl.hidden = true;
+        backgroundCardEl.innerHTML = "";
+        clearInterval(backgroundCardEl._liveToolsTimer);
+        backgroundCardEl._liveToolsTimer = null;
+        backgroundCardEl._liveToolParts = null;
+      } else {
+        if (backgroundCardEl.hidden) {
+          backgroundCardEl.hidden = false;
+          backgroundCardEl.innerHTML = `<div class="background-card-title">⏳ Background task running</div>`;
+        }
+        syncBackgroundToolParts(backgroundCardEl, evt.parts);
+      }
+      refreshPersonas();
     } else if (evt.type === "handoff") {
       // Handoff started or reclaimed (possibly from another tab) - re-sync
       // the card/composer, and on reclaim reload history so the imported
@@ -838,6 +905,14 @@ async function selectPersona(p) {
   delete handoffCardEl.dataset.key;
   handoffCardEl.hidden = true;
   handoffCardEl.innerHTML = "";
+  // Same reasoning as the handoff-card reset above - avoid showing the
+  // PREVIOUS persona's background-task state for an instant before the
+  // refreshPersonas() call below repopulates it for the new one.
+  backgroundCardEl.hidden = true;
+  backgroundCardEl.innerHTML = "";
+  clearInterval(backgroundCardEl._liveToolsTimer);
+  backgroundCardEl._liveToolsTimer = null;
+  backgroundCardEl._liveToolParts = null;
   setComposerEnabled(!p.handoff);
   stagedAttachments = [];
   renderStagedAttachments();

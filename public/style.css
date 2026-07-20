@@ -70,6 +70,12 @@ body {
 .activity-dot.idle { background: #5a5a5e; }
 .activity-dot.working { background: #0a84ff; animation: activity-pulse 1.2s ease-in-out infinite; }
 .activity-dot.blocked { background: #ff453a; }
+
+/* A detached background dispatch (symposion-I45) is orthogonal to
+   activity-dot (foreground pendingTurn only) - shown alongside it, not
+   instead of it, since a persona can be idle in the foreground while a
+   background task is still running. */
+.background-dot { width: 7px; height: 7px; border-radius: 3px; flex-shrink: 0; background: #bf5af2; animation: activity-pulse 1.2s ease-in-out infinite; }
 @keyframes activity-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
@@ -246,6 +252,18 @@ body {
   padding: 6px 8px; color: white; font-size: 12px; font-family: inherit;
 }
 .blocked-card-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+
+.background-task-card {
+  margin: 0 14px 10px 14px;
+  border: 1px solid #bf5af266;
+  background: #bf5af214;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+}
+.background-task-card[hidden] { display: none; }
+.background-card-title { font-weight: 600; color: #d9a6ff; }
+.background-task-card .live-tools { border-top-color: #bf5af233; }
 .blocked-btn {
   background: #3a3a3c; color: white; border: none; border-radius: 6px;
   padding: 8px 14px; cursor: pointer; font-size: 12px;
