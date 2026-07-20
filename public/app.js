@@ -126,7 +126,10 @@ function renderPersonaList(personas) {
   for (const p of personas) {
     const li = document.createElement("li");
     li.className = "persona-item" + (p.id === activePersonaId ? " active" : "") + (p.blocked ? " blocked" : "");
+    const activityState = p.blocked ? "blocked" : p.working ? "working" : "idle";
+    const activityTitle = { blocked: "Blocked - needs your input", working: "Working", idle: "Idle" }[activityState];
     li.innerHTML = `
+      <span class="activity-dot ${activityState}" title="${activityTitle}"></span>
       <span class="ttl-dot ${p.ttlStatus}" title="${p.ttlApproximate ? "Approximate - real cache window unknown for this provider" : "Confirmed 1-hour ephemeral cache window"}"></span>
       <span class="persona-name-block">
         <span class="persona-name">${p.blocked ? '<span class="blocked-flag">⚠</span>' : ""}${p.handoff ? '<span class="handoff-flag" title="Handed off to Remote Control">📱</span>' : ""}${p.name}${p.alive ? "" : " (crashed)"}</span>
@@ -885,7 +888,13 @@ async function loadMessages() {
   chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
 }
 
-function populateModelSelect() {
+/**
+ * preferredModelID/preferredProviderID (from defaults.lastRecipe) win over
+ * the hardcoded CLAUDE_CODE_DEFAULT/API_DEFAULT when present and still a
+ * valid option - lets the New Agent modal default to whatever recipe was
+ * last used instead of always resetting to the same fixed model.
+ */
+function populateModelSelect(preferredModelID, preferredProviderID) {
   modalModelEl.innerHTML = "";
   if (selectedBackend === "claude-code") {
     for (const m of claudeModels) {
@@ -894,8 +903,13 @@ function populateModelSelect() {
       opt.textContent = m.name;
       modalModelEl.appendChild(opt);
     }
-    modalModelEl.value = defaults.claudeCodeDefault.modelID;
+    const preferred = preferredModelID && claudeModels.some((m) => m.modelID === preferredModelID);
+    modalModelEl.value = preferred ? preferredModelID : defaults.claudeCodeDefault.modelID;
   } else {
+    // Matched by (modelID, providerID) pair, not modelID alone - two
+    // providers could in principle expose the same modelID string, and
+    // .value= would silently pick whichever option comes first.
+    let preferredOpt = null;
     for (const p of providers) {
       const group = document.createElement("optgroup");
       group.label = p.name;
@@ -904,16 +918,22 @@ function populateModelSelect() {
         opt.value = m.modelID;
         opt.textContent = m.name;
         opt.dataset.providerId = p.providerID;
+        if (m.modelID === preferredModelID && (!preferredProviderID || p.providerID === preferredProviderID)) preferredOpt = opt;
         group.appendChild(opt);
       }
       modalModelEl.appendChild(group);
     }
-    modalModelEl.value = defaults.apiDefault.modelID;
+    if (preferredOpt) preferredOpt.selected = true;
+    else modalModelEl.value = defaults.apiDefault.modelID;
   }
 }
 
-/** Permission policy only applies to claude-code personas - api-backend blocking is handled per-request via #2's card, not a spawn-time flag. */
-function populatePermissionModeSelect() {
+/**
+ * Permission policy only applies to claude-code personas - api-backend
+ * blocking is handled per-request via #2's card, not a spawn-time flag.
+ * preferredValue (from defaults.lastRecipe) wins when still a valid option.
+ */
+function populatePermissionModeSelect(preferredValue) {
   const show = selectedBackend === "claude-code";
   modalPermissionLabelEl.hidden = !show;
   modalPermissionModeEl.hidden = !show;
@@ -925,6 +945,7 @@ function populatePermissionModeSelect() {
     opt.textContent = m.name;
     modalPermissionModeEl.appendChild(opt);
   }
+  if (preferredValue && permissionModes.some((m) => m.value === preferredValue)) modalPermissionModeEl.value = preferredValue;
 }
 
 backendBtns.forEach((btn) => {
@@ -1022,11 +1043,16 @@ newAgentBtn.addEventListener("click", async () => {
   if (providers.length === 0) providers = await fetchProviders();
   if (claudeModels.length === 0) claudeModels = await fetchClaudeModels();
   if (permissionModes.length === 0) permissionModes = await fetchPermissionModes();
-  if (!defaults) defaults = await fetchDefaults();
-  selectedBackend = "api";
-  backendBtns.forEach((b) => b.classList.toggle("active", b.dataset.backend === "api"));
-  populateModelSelect();
-  populatePermissionModeSelect();
+  defaults = await fetchDefaults(); // re-fetch every open, not just once - lastRecipe changes as agents get created
+
+  // Prefill from the most recently created agent's recipe instead of always
+  // resetting to the hardcoded default - the common case is spinning up
+  // another agent on the same backend/model as the last one.
+  const recipe = defaults?.lastRecipe;
+  selectedBackend = recipe?.backend ?? "api";
+  backendBtns.forEach((b) => b.classList.toggle("active", b.dataset.backend === selectedBackend));
+  populateModelSelect(recipe?.modelID, recipe?.providerID);
+  populatePermissionModeSelect(recipe?.permissionMode);
   modalWorkspaceEl.value = defaults?.defaultWorkspace ?? "";
   // No name is ever required - prefill with a random star name (editable,
   // and re-rollable via the dice button) rather than leaving it blank.
