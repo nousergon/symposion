@@ -278,38 +278,45 @@ body {
 
 .msg-cost { margin-top: 6px; font-size: 10px; color: #9a9a9e; opacity: 0.8; }
 
-.tool-parts {
+.tool-parts, .live-tools {
   margin-top: 8px; padding-top: 6px; border-top: 1px solid #ffffff22;
   font-size: 11px;
 }
-.tool-parts summary { cursor: pointer; color: #9a9a9e; }
-.tool-parts summary:hover { color: #eaeaea; }
-.tool-part-entry {
-  margin-top: 6px; padding: 6px 8px; background: #00000022; border-radius: 6px;
-  border-left: 2px solid #6a6a6e;
-}
-.tool-part-entry.error { border-left-color: #ff453a; }
-.tool-part-name { font-weight: 600; color: #eaeaea; margin-bottom: 4px; }
-.tool-part-input, .tool-part-output {
-  margin: 4px 0 0 0; white-space: pre-wrap; word-break: break-word;
-  font-size: 10px; color: #b0b0b5; font-family: monospace;
-  max-height: 200px; overflow-y: auto;
-}
-.tool-part-output { color: #9a9a9e; border-top: 1px dashed #3a3a3c; padding-top: 4px; }
-.tool-part-entry.error .tool-part-output { color: #ff9b96; }
+.tool-parts > summary, .live-tools > summary { cursor: pointer; color: #9a9a9e; }
+.tool-parts > summary:hover, .live-tools > summary:hover { color: #eaeaea; }
+.tool-parts[open] > summary, .live-tools[open] > summary { margin-bottom: 6px; }
 
-.msg-text:empty { display: none; }
-
-.live-tools {
-  display: flex; flex-direction: column; gap: 4px;
-  margin-top: 8px; padding-top: 6px; border-top: 1px solid #ffffff22;
+/* Row container for both the live (streaming) and finished tool-call lists -
+   capped + scrollable once open so a long fan-out (dozens of calls) can't
+   balloon the message bubble; the outer <details> being collapsed by
+   default is what "minimizes" the list, this cap handles the case where
+   it's expanded. */
+.tool-rows { display: flex; flex-direction: column; gap: 4px; }
+.tool-parts[open] > .tool-rows, .live-tools[open] > .tool-rows {
+  max-height: 320px; overflow-y: auto;
 }
+
+/* Per-call row: a <details> so each one expands independently to show its
+   full untruncated input/output (previously the label was hard-truncated
+   with no way to see the rest). Shared by live rows and finished rows. */
 .live-tool-entry {
-  display: flex; align-items: center; gap: 7px;
   font-size: 11px; color: #b0b0b5;
 }
+.live-tool-entry > summary { cursor: pointer; }
+.live-tool-entry.tool-part-entry {
+  padding: 2px 8px; background: #00000022; border-radius: 6px;
+  border-left: 2px solid #6a6a6e;
+}
+.live-tool-entry.tool-part-entry.error { border-left-color: #ff453a; }
+.tool-row {
+  display: flex; align-items: center; gap: 7px;
+}
 .live-tool-label {
+  flex: 1 1 auto; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.live-tool-entry[open] .live-tool-label {
+  white-space: normal; word-break: break-word;
 }
 .live-tool-dot {
   flex: none; width: 8px; height: 8px; border-radius: 50%;
@@ -326,6 +333,16 @@ body {
 @keyframes live-tool-spin {
   to { transform: rotate(360deg); }
 }
+
+.tool-part-input, .tool-part-output {
+  margin: 4px 0 0 0; white-space: pre-wrap; word-break: break-word;
+  font-size: 10px; color: #b0b0b5; font-family: monospace;
+  max-height: 200px; overflow-y: auto;
+}
+.tool-part-output { color: #9a9a9e; border-top: 1px dashed #3a3a3c; padding-top: 4px; }
+.live-tool-entry.error .tool-part-output { color: #ff9b96; }
+
+.msg-text:empty { display: none; }
 
 /* Subagent (Agent tool) dispatches get their own accent so they read as
    "a subagent is working" rather than a generic tool call - the CLI gives no

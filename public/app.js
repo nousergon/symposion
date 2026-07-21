@@ -656,6 +656,59 @@ function ensureMsgTextEl(bubble) {
 }
 
 /**
+ * Builds the collapsible row for one tool call, shared by the live
+ * in-progress list and the finished-turn history view - both need the same
+ * "one-line summary, expand for the full untruncated input/output" shape
+ * (previously the live view had no expand at all, and its label was hard
+ * `truncateLabel()`-cut with no way to see the rest, e.g. a long Bash
+ * command or grep pattern). A `<details>` gives per-row expand/collapse for
+ * free, including the native disclosure triangle as the "click to see more"
+ * affordance, and its `open` state is preserved by the caller across
+ * re-renders (see renderLiveTools's openIds capture below).
+ */
+function buildToolEntry(t, extraClass) {
+  // t.status is only present on live SSE "tool" events; persisted/replayed
+  // parts (finished-message history, background-card snapshots, mid-turn
+  // reload replay) never carry it and instead encode status via
+  // output/isError, which stay null until the tool_result lands (see
+  // claude-code-backend.mjs) - output is non-null once resolved even for an
+  // empty result, since it's always JSON.stringify'd.
+  const status = t.status ?? (t.output !== null ? (t.isError ? "error" : "done") : "running");
+  const entry = document.createElement("details");
+  entry.className = `live-tool-entry ${status}${t.name === "Agent" ? " agent" : ""}${
+    extraClass ? ` ${extraClass}` : ""
+  }`;
+  if (t.toolUseId) entry.dataset.toolUseId = t.toolUseId;
+
+  const summary = document.createElement("summary");
+  const row = document.createElement("span");
+  row.className = "tool-row";
+  const dot = document.createElement("span");
+  dot.className = "live-tool-dot";
+  row.appendChild(dot);
+  const label = document.createElement("span");
+  label.className = "live-tool-label";
+  label.textContent = toolLiveLabel(t);
+  row.appendChild(label);
+  summary.appendChild(row);
+  entry.appendChild(summary);
+
+  const inputEl = document.createElement("pre");
+  inputEl.className = "tool-part-input";
+  inputEl.textContent = JSON.stringify(t.input ?? {}, null, 2);
+  entry.appendChild(inputEl);
+
+  if (t.output != null) {
+    const outputEl = document.createElement("pre");
+    outputEl.className = "tool-part-output";
+    outputEl.textContent = typeof t.output === "string" ? t.output : JSON.stringify(t.output, null, 2);
+    entry.appendChild(outputEl);
+  }
+
+  return entry;
+}
+
+/**
  * Live-updating list of in-progress/just-finished tool calls for a turn
  * that's still streaming - the "how do I know the agent is actually working"
  * gap: previously the only mid-turn signal was a generic bouncing-dots
@@ -665,26 +718,44 @@ function ensureMsgTextEl(bubble) {
  * toolUseId so repeated updates (running -> done/error) update the same row
  * in place rather than appending duplicates. Superseded by the final
  * collapsed buildToolPartsToggle() once the turn's "done" event lands.
+ *
+ * The whole list is itself a <details> (collapsed by default, like
+ * buildToolPartsToggle) so a long-running turn with dozens of calls doesn't
+ * flood the bubble - a long fan-out otherwise grew this list unbounded with
+ * no way to minimize it. Open/collapsed state (both the outer list and any
+ * individually expanded rows) is preserved across the re-renders this
+ * function does on every tool update / 1s elapsed-timer tick, keyed by
+ * toolUseId so it survives rows being replaced wholesale each render.
  */
 function renderLiveTools(bubble) {
   let el = bubble.querySelector(":scope > .live-tools");
+  const wasOpen = el?.open ?? false;
+  const openIds = new Set(
+    el ? [...el.querySelectorAll(".live-tool-entry[open]")].map((r) => r.dataset.toolUseId).filter(Boolean) : []
+  );
   if (!el) {
-    el = document.createElement("div");
+    el = document.createElement("details");
     el.className = "live-tools";
     bubble.appendChild(el);
   }
   el.innerHTML = "";
-  for (const t of bubble._liveToolParts ?? []) {
-    const row = document.createElement("div");
-    row.className = `live-tool-entry ${t.status ?? "running"}${t.name === "Agent" ? " agent" : ""}`;
-    const dot = document.createElement("span");
-    dot.className = "live-tool-dot";
-    row.appendChild(dot);
-    const label = document.createElement("span");
-    label.className = "live-tool-label";
-    label.textContent = toolLiveLabel(t);
-    row.appendChild(label);
-    el.appendChild(row);
+  el.open = wasOpen;
+
+  const parts = bubble._liveToolParts ?? [];
+  const runningCount = parts.filter((p) => p.status === "running").length;
+  const summary = document.createElement("summary");
+  summary.textContent =
+    `${parts.length} tool call${parts.length === 1 ? "" : "s"}` + (runningCount ? ` · ${runningCount} running` : "");
+  el.appendChild(summary);
+
+  const rows = document.createElement("div");
+  rows.className = "tool-rows";
+  el.appendChild(rows);
+
+  for (const t of parts) {
+    const entry = buildToolEntry(t);
+    if (t.toolUseId && openIds.has(t.toolUseId)) entry.open = true;
+    rows.appendChild(entry);
   }
 }
 
@@ -788,28 +859,12 @@ function buildToolPartsToggle(parts) {
   summary.textContent = `${toolParts.length} tool call${toolParts.length === 1 ? "" : "s"}`;
   details.appendChild(summary);
 
+  const rows = document.createElement("div");
+  rows.className = "tool-rows";
+  details.appendChild(rows);
+
   for (const t of toolParts) {
-    const entry = document.createElement("div");
-    entry.className = "tool-part-entry" + (t.isError ? " error" : "");
-
-    const nameEl = document.createElement("div");
-    nameEl.className = "tool-part-name";
-    nameEl.textContent = t.name ?? "tool";
-    entry.appendChild(nameEl);
-
-    const inputEl = document.createElement("pre");
-    inputEl.className = "tool-part-input";
-    inputEl.textContent = JSON.stringify(t.input ?? {}, null, 2);
-    entry.appendChild(inputEl);
-
-    if (t.output != null) {
-      const outputEl = document.createElement("pre");
-      outputEl.className = "tool-part-output";
-      outputEl.textContent = typeof t.output === "string" ? t.output : JSON.stringify(t.output, null, 2);
-      entry.appendChild(outputEl);
-    }
-
-    details.appendChild(entry);
+    rows.appendChild(buildToolEntry(t, "tool-part-entry"));
   }
 
   return details;
