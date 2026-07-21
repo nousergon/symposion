@@ -14,7 +14,9 @@ function fakeSession() {
     currentParts: [],
     blockTypes: new Map(),
     onBackgroundEvent: null,
+    scheduledWakeup: null,
     _handleLine: ClaudeCodeSession.prototype._handleLine,
+    _updateScheduledWakeup: ClaudeCodeSession.prototype._updateScheduledWakeup,
   };
 }
 
@@ -95,4 +97,42 @@ test("foreground: events with a pending queue entry resolve normally and never c
   assert.ok(resolved);
   assert.equal(resolved.replyText, "done");
   assert.equal(s.queue.length, 0);
+});
+
+test("scheduledWakeup: a live ScheduleWakeup call sets an ETA + reason, resolved at the turn's result event", () => {
+  const s = fakeSession();
+  s.queue.push({ resolve: () => {}, reject: () => {}, onToolUpdate: () => {} });
+
+  const before = Date.now();
+  s._handleLine(assistantLine([{ type: "tool_use", id: "t1", name: "ScheduleWakeup", input: { delaySeconds: 90, reason: "watching CI" } }]));
+  s._handleLine(resultLine());
+
+  assert.ok(s.scheduledWakeup);
+  assert.equal(s.scheduledWakeup.reason, "watching CI");
+  assert.ok(s.scheduledWakeup.at >= before + 90_000);
+});
+
+test("scheduledWakeup: stop:true clears it instead of setting an ETA", () => {
+  const s = fakeSession();
+  s.queue.push({ resolve: () => {}, reject: () => {}, onToolUpdate: () => {} });
+
+  s._handleLine(assistantLine([{ type: "tool_use", id: "t1", name: "ScheduleWakeup", input: { stop: true } }]));
+  s._handleLine(resultLine());
+
+  assert.equal(s.scheduledWakeup, null);
+});
+
+test("scheduledWakeup: a prior wakeup is cleared once a turn completes without re-scheduling one", () => {
+  const s = fakeSession();
+  s.queue.push({ resolve: () => {}, reject: () => {}, onToolUpdate: () => {} });
+  s._handleLine(assistantLine([{ type: "tool_use", id: "t1", name: "ScheduleWakeup", input: { delaySeconds: 60 } }]));
+  s._handleLine(resultLine());
+  assert.ok(s.scheduledWakeup);
+
+  s.queue.push({ resolve: () => {}, reject: () => {}, onToolUpdate: () => {} });
+  s._handleLine(assistantLine([{ type: "tool_use", id: "t2", name: "Bash", input: { command: "ls" } }]));
+  s._handleLine(userToolResultLine("t2", "file1"));
+  s._handleLine(resultLine());
+
+  assert.equal(s.scheduledWakeup, null);
 });

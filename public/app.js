@@ -10,6 +10,13 @@ let streamingBubble = null;
 let thinkingBubble = null;
 let latestPersonas = []; // last /api/personas snapshot, kept for sync lookups (e.g. the blocked card)
 let stagedAttachments = []; // [{ file: File, localId }] - staged for the NEXT send, cleared after submit
+// Draft (composer text + staged attachments) per persona id, so switching to
+// another persona and back doesn't lose an in-progress message - previously
+// stagedAttachments was a single global array unconditionally wiped on every
+// selectPersona(), and the composer <textarea> wasn't touched at all, so a
+// draft typed for persona A would silently reappear addressed to whichever
+// persona B you'd switched to (and send to the wrong one if submitted there).
+const personaDrafts = new Map(); // id -> { text: string, attachments: [{file, localId}] }
 
 const personaListEl = document.getElementById("persona-list");
 const chatHeaderTextEl = document.getElementById("chat-header-text");
@@ -122,6 +129,30 @@ function costLabel(costUsd) {
   return costUsd < 0.01 ? `$${costUsd.toFixed(4)}` : `$${costUsd.toFixed(2)}`;
 }
 
+function wakeupCountdown(atMs) {
+  const secs = Math.max(0, Math.round((atMs - Date.now()) / 1000));
+  return secs < 60 ? `in ${secs}s` : `in ${Math.round(secs / 60)}m`;
+}
+
+/**
+ * A short, always-visible line of what a persona is actually DOING right
+ * now - previously the only signal was a 7px activity-dot (easy to miss,
+ * and its meaning is only in a hover tooltip) sitting next to a much more
+ * visually prominent TTL dot+countdown that's about something unrelated
+ * (cache window, not job progress). Recomputed on every render (5s poll +
+ * SSE-triggered refreshes), so a wakeup countdown ticks down and "Working…"
+ * disappears the moment a turn actually finishes - null (nothing rendered)
+ * for a genuinely idle persona with nothing pending, so this doesn't add
+ * noise to the common case.
+ */
+function statusLabel(p) {
+  const bits = [];
+  if (p.working) bits.push("Working…");
+  if (p.backgroundActive) bits.push("Background task running");
+  if (p.scheduledWakeup) bits.push(`Wakes ${wakeupCountdown(p.scheduledWakeup.at)}`);
+  return bits.length ? bits.join(" · ") : null;
+}
+
 function renderPersonaList(personas) {
   personaListEl.innerHTML = "";
   for (const p of personas) {
@@ -129,6 +160,7 @@ function renderPersonaList(personas) {
     li.className = "persona-item" + (p.id === activePersonaId ? " active" : "") + (p.blocked ? " blocked" : "");
     const activityState = p.blocked ? "blocked" : p.working ? "working" : "idle";
     const activityTitle = { blocked: "Blocked - needs your input", working: "Working", idle: "Idle" }[activityState];
+    const status = statusLabel(p);
     li.innerHTML = `
       <span class="activity-dot ${activityState}" title="${activityTitle}"></span>
       ${p.backgroundActive ? '<span class="background-dot" title="A background task is still running"></span>' : ""}
@@ -136,6 +168,7 @@ function renderPersonaList(personas) {
       <span class="persona-name-block">
         <span class="persona-name">${p.blocked ? '<span class="blocked-flag">⚠</span>' : ""}${p.handoff ? '<span class="handoff-flag" title="Handed off to Remote Control">📱</span>' : ""}${p.name}${p.alive ? "" : " (crashed)"}</span>
         <span class="persona-model">${modelLabel(p)} · ${workspaceLabel(p)}${costLabel(p.totalCostUsd) ? ` · ${costLabel(p.totalCostUsd)}` : ""}</span>
+        ${status ? `<span class="persona-status">${status}</span>` : ""}
       </span>
       <span class="ttl-label" title="${p.ttlApproximate ? "Approximate - real cache window unknown for this provider" : "Confirmed 1-hour ephemeral cache window"}">${ttlLabel(p)}</span>
       <button type="button" class="persona-rename" title="Rename agent" data-id="${p.id}">✎</button>
@@ -178,6 +211,7 @@ async function deletePersona(p) {
   if (!confirm(`Delete "${p.name}"? This fully winds down its backend (kills the process, removes its worktree/branch or OpenCode session) - not reversible.`)) return;
 
   await fetch(`/api/personas/${p.id}`, { method: "DELETE" });
+  personaDrafts.delete(p.id);
 
   if (p.id === activePersonaId) {
     activePersonaId = null;
@@ -188,6 +222,7 @@ async function deletePersona(p) {
     handoffCardEl.hidden = true;
     handoffCardEl.innerHTML = "";
     chatMessagesEl.innerHTML = "";
+    chatTextEl.value = "";
     chatTextEl.disabled = true;
     chatAttachBtnEl.disabled = true;
     chatMicBtnEl.disabled = true;
@@ -897,6 +932,9 @@ async function selectPersona(p) {
   // actually changed - pure churn with a chance of visible flicker on a turn
   // that's still streaming.
   if (p.id === activePersonaId) return;
+  if (activePersonaId) {
+    personaDrafts.set(activePersonaId, { text: chatTextEl.value, attachments: stagedAttachments });
+  }
   activePersonaId = p.id;
   chatHeaderTextEl.textContent = `${p.name} — ${modelLabel(p)} — ${workspaceLabel(p)}`;
   renameBtnEl.hidden = false;
@@ -914,7 +952,9 @@ async function selectPersona(p) {
   backgroundCardEl._liveToolsTimer = null;
   backgroundCardEl._liveToolParts = null;
   setComposerEnabled(!p.handoff);
-  stagedAttachments = [];
+  const draft = personaDrafts.get(p.id);
+  chatTextEl.value = draft?.text ?? "";
+  stagedAttachments = draft?.attachments ?? [];
   renderStagedAttachments();
   connectStream(p.id);
   await refreshPersonas();
