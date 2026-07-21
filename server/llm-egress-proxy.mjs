@@ -22,6 +22,20 @@ import path from "node:path";
 // defense-in-depth property the Claude-Code-routed path already has.
 const ROUTING_DIR = path.join(os.homedir(), "Development", ".llm-routing");
 const PROXY_SCRIPT = path.join(ROUTING_DIR, "llm_egress_proxy.py");
+// config-I3007 dev-security 1/5: prefer the frozen standalone binary so every
+// egress-proxy instance runs with its own process identity (distinct from the
+// shared python interpreter), which is what makes a LuLu per-process firewall
+// rule meaningful. Falls back to `python3 PROXY_SCRIPT` when the binary hasn't
+// been built on this machine (.llm-routing/bin/build-egress-proxy.sh).
+const EGRESS_BIN = path.join(ROUTING_DIR, "bin", "llm-egress-proxy");
+function resolveProxyLaunch() {
+  try {
+    fs.accessSync(EGRESS_BIN, fs.constants.X_OK);
+    return { cmd: EGRESS_BIN, baseArgs: [] };
+  } catch {
+    return { cmd: "python3", baseArgs: [PROXY_SCRIPT] };
+  }
+}
 
 async function isHealthy(port) {
   try {
@@ -50,10 +64,11 @@ export async function ensureEgressProxy({ providerId, port, upstreamHost, apiKey
 
   const logPath = path.join(ROUTING_DIR, `symposion-${providerId}-egress-proxy.log`);
   const logStream = fs.createWriteStream(logPath, { flags: "a" });
+  const { cmd, baseArgs } = resolveProxyLaunch();
   const proc = spawn(
-    "python3",
+    cmd,
     [
-      PROXY_SCRIPT,
+      ...baseArgs,
       "--port", String(port),
       "--upstream-host", upstreamHost,
       "--api-key-env", apiKeyEnv,
