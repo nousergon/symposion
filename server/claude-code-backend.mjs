@@ -102,6 +102,12 @@ export class ClaudeCodeSession {
     this.queue = []; // pending {resolve, reject} for sendMessage calls, one at a time
     this.crashError = null;
 
+    // { at: epochMs, reason } when this persona's last completed turn ended
+    // with a live ScheduleWakeup call (/loop dynamic-mode); null otherwise.
+    // Set/cleared in _updateScheduledWakeup(), called from the "result"
+    // handler below - see that method's doc comment.
+    this.scheduledWakeup = null;
+
     // Settable by the caller (server/index.mjs) after construction - fires
     // for turn-lifecycle events that arrive on this same long-lived process
     // while `queue` is empty, i.e. NOT in response to a sendMessage() call
@@ -274,8 +280,29 @@ export class ClaudeCodeSession {
       } else {
         this.onBackgroundEvent?.({ status: "done", parts: this.currentParts });
       }
+      this._updateScheduledWakeup();
       this.currentParts = [];
     }
+  }
+
+  /**
+   * A persona has a pending wakeup iff the turn that JUST finished ended
+   * with a live (non-stop) ScheduleWakeup call - previously invisible in
+   * symposion's UI once that turn ended, since it was just another tool
+   * call buried in the (collapsed) tool-parts history, with nothing
+   * distinguishing "idle, nothing pending" from "idle, but about to resume
+   * on its own in 4 minutes". Any other turn ending - including one that
+   * calls ScheduleWakeup with stop:true, or one that doesn't call it at
+   * all - clears it, so a fired wakeup (which starts a new turn) or an
+   * explicit loop-stop both correctly drop the indicator.
+   */
+  _updateScheduledWakeup() {
+    const call = [...this.currentParts].reverse().find((p) => p.type === "tool" && p.name === "ScheduleWakeup");
+    const delaySeconds = Number(call?.input?.delaySeconds);
+    this.scheduledWakeup =
+      call && call.input?.stop !== true && Number.isFinite(delaySeconds) && delaySeconds > 0
+        ? { at: Date.now() + delaySeconds * 1000, reason: call.input?.reason ?? null }
+        : null;
   }
 
   /**

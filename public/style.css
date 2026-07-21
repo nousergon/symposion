@@ -61,6 +61,10 @@ body {
 .persona-name-block { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .persona-name { font-size: 13px; }
 .persona-model { font-size: 10px; color: #9a9a9e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.persona-status {
+  font-size: 10px; font-weight: 600; color: #5ac8fa;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .ttl-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
 .ttl-dot.green { background: #34c759; }
 .ttl-dot.yellow { background: #ffd60a; }

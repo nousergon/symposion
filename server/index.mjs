@@ -427,6 +427,10 @@ function personaSummary(p) {
     // wireBackgroundEvents/ClaudeCodeSession.onBackgroundEvent (symposion-I45).
     backgroundActive: !!p.backgroundTask,
     backgroundParts: p.backgroundTask?.parts ?? null,
+    // See ClaudeCodeSession._updateScheduledWakeup - null for opencode-backed
+    // personas (no claudeSession) or a claude-code persona with no pending
+    // /loop wakeup.
+    scheduledWakeup: p.claudeSession?.scheduledWakeup ?? null,
     pendingPermission: p.pendingPermission ?? null,
     pendingQuestion: p.pendingQuestion ?? null,
     totalCostUsd: p.totalCostUsd ?? 0,
