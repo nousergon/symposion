@@ -53,6 +53,23 @@ const dirBrowserListEl = document.getElementById("dir-browser-list");
 const dirBrowserCancelEl = document.getElementById("dir-browser-cancel");
 const dirBrowserSelectEl = document.getElementById("dir-browser-select");
 
+// The composer is a textarea that grows with content (capped by the
+// max-height/overflow-y in .chat-input textarea) - height must be
+// recomputed after every value change, not just typed input, since
+// programmatic writes (clear-on-send, draft restore, dictation) bypass
+// the "input" event that a resize-on-type listener alone would rely on.
+function resizeChatText() {
+  chatTextEl.style.height = "auto";
+  chatTextEl.style.height = `${chatTextEl.scrollHeight}px`;
+}
+chatTextEl.addEventListener("input", resizeChatText);
+chatTextEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    chatFormEl.requestSubmit();
+  }
+});
+
 async function fetchPersonas() {
   const res = await fetch("/api/personas");
   return res.json();
@@ -223,6 +240,7 @@ async function deletePersona(p) {
     handoffCardEl.innerHTML = "";
     chatMessagesEl.innerHTML = "";
     chatTextEl.value = "";
+    resizeChatText();
     chatTextEl.disabled = true;
     chatAttachBtnEl.disabled = true;
     chatMicBtnEl.disabled = true;
@@ -1009,6 +1027,7 @@ async function selectPersona(p) {
   setComposerEnabled(!p.handoff);
   const draft = personaDrafts.get(p.id);
   chatTextEl.value = draft?.text ?? "";
+  resizeChatText();
   stagedAttachments = draft?.attachments ?? [];
   renderStagedAttachments();
   connectStream(p.id);
@@ -1318,6 +1337,7 @@ function startDictation() {
     }
     const prefix = dictationBaseText ? `${dictationBaseText} ` : "";
     chatTextEl.value = `${prefix}${finalText}${interimText}`;
+    resizeChatText();
   };
 
   recognizer.onerror = () => stopDictation();
@@ -1346,6 +1366,7 @@ chatFormEl.addEventListener("submit", async (e) => {
   const text = chatTextEl.value.trim();
   if ((!text && stagedAttachments.length === 0) || !activePersonaId) return;
   chatTextEl.value = "";
+  resizeChatText();
 
   const attachments = await Promise.all(
     stagedAttachments.map(async ({ file }) => ({ filename: file.name, mime: resolveMime(file), base64: await fileToBase64(file) }))
