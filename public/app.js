@@ -297,6 +297,7 @@ function wakeupCountdown(atMs) {
 function statusLabel(p) {
   const bits = [];
   if (p.working) bits.push("Working…");
+  else if (p.readyForReview && !p.blocked) bits.push("Ready for review");
   if (p.backgroundActive) bits.push("Background task running");
   if (p.scheduledWakeup) bits.push(`Wakes ${wakeupCountdown(p.scheduledWakeup.at)}`);
   return bits.length ? bits.join(" · ") : null;
@@ -306,18 +307,29 @@ function renderPersonaList(personas) {
   personaListEl.innerHTML = "";
   for (const p of personas) {
     const li = document.createElement("li");
-    li.className = "persona-item" + (p.id === activePersonaId ? " active" : "") + (p.blocked ? " blocked" : "");
-    const activityState = p.blocked ? "blocked" : p.working ? "working" : "idle";
-    const activityTitle = { blocked: "Blocked - needs your input", working: "Working", idle: "Idle" }[activityState];
+    // blocked outranks ready-for-review: both can be true for the same turn
+    // (a denied permission still fires "done"), and blocked needs Brian's
+    // input while ready-for-review is merely "come look" - the more urgent
+    // one wins the row's visual treatment.
+    const ready = p.readyForReview && !p.blocked;
+    li.className =
+      "persona-item" + (p.id === activePersonaId ? " active" : "") + (p.blocked ? " blocked" : "") + (ready ? " ready-for-review" : "");
+    const activityState = p.blocked ? "blocked" : ready ? "ready" : p.working ? "working" : "idle";
+    const activityTitle = {
+      blocked: "Blocked - needs your input",
+      ready: "Ready for review",
+      working: "Working",
+      idle: "Idle",
+    }[activityState];
     const status = statusLabel(p);
     li.innerHTML = `
       <span class="activity-dot ${activityState}" title="${activityTitle}"></span>
       ${p.backgroundActive ? '<span class="background-dot" title="A background task is still running"></span>' : ""}
       <span class="ttl-dot ${p.ttlStatus}" title="${p.ttlApproximate ? "Approximate - real cache window unknown for this provider" : "Confirmed 1-hour ephemeral cache window"}"></span>
       <span class="persona-name-block">
-        <span class="persona-name">${p.blocked ? '<span class="blocked-flag">⚠</span>' : ""}${p.handoff ? '<span class="handoff-flag" title="Handed off to Remote Control">📱</span>' : ""}${p.name}${p.alive ? "" : " (crashed)"}</span>
+        <span class="persona-name">${p.blocked ? '<span class="blocked-flag">⚠</span>' : ready ? '<span class="ready-flag" title="Reply ready for review">✓</span>' : ""}${p.handoff ? '<span class="handoff-flag" title="Handed off to Remote Control">📱</span>' : ""}${p.name}${p.alive ? "" : " (crashed)"}</span>
         <span class="persona-model">${modelLabel(p)} · ${workspaceLabel(p)}${costLabel(p.totalCostUsd) ? ` · ${costLabel(p.totalCostUsd)}` : ""}</span>
-        ${status ? `<span class="persona-status">${status}</span>` : ""}
+        ${status ? `<span class="persona-status${ready ? " ready" : ""}">${status}</span>` : ""}
       </span>
       <span class="ttl-label" title="${p.ttlApproximate ? "Approximate - real cache window unknown for this provider" : "Confirmed 1-hour ephemeral cache window"}">${ttlLabel(p)}</span>
       <button type="button" class="persona-rename" title="Edit agent (name/model)" data-id="${p.id}">✎</button>

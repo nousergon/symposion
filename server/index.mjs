@@ -134,6 +134,7 @@ for (const record of loadPersonas()) {
     pendingQuestion: null,
     pendingTurn: null,
     backgroundTask: null,
+    turnFinishedUnseen: false,
   });
 }
 console.log(`[store] loaded ${personas.size} persona(s) from disk`);
@@ -519,6 +520,13 @@ function personaSummary(p) {
     alive: p.backend === "claude-code" ? (p.claudeSession ? p.claudeSession.alive : true) : true,
     blocked: (p.lastDenials?.length ?? 0) > 0 || !!p.pendingPermission || !!p.pendingQuestion,
     working: !!p.pendingTurn,
+    // True from the moment a turn finishes while Brian wasn't watching this
+    // persona (same presence gate as notifyTurnFinished below) until he
+    // actually selects it again (cleared in POST /api/presence) - the
+    // "come look, this one finished" signal that used to not exist: a
+    // persona that just replied and one that's never spoken were previously
+    // visually identical (both idle/grey) once `working` went false.
+    readyForReview: !!p.turnFinishedUnseen,
     // Distinct from `working` (foreground pendingTurn): true when a detached
     // background dispatch (e.g. a run_in_background Agent-tool subagent) is
     // still running after the turn that launched it already ended - see
@@ -640,7 +648,14 @@ app.post("/api/webpush/subscribe", (req, res) => {
 // above for what this drives. personaId: null means "not currently
 // watching anything" (tab hidden/unfocused, or no persona selected).
 app.post("/api/presence", (req, res) => {
-  presence.update(req.body?.personaId);
+  const personaId = req.body?.personaId;
+  presence.update(personaId);
+  // Watching a persona is what "reviewing" it means here - clear its
+  // ready-for-review flag the moment Brian's actually looking at it again.
+  if (personaId) {
+    const persona = personas.get(personaId);
+    if (persona) persona.turnFinishedUnseen = false;
+  }
   res.status(204).end();
 });
 
@@ -732,6 +747,7 @@ app.post("/api/personas", async (req, res) => {
         pendingPermission: null,
         pendingQuestion: null,
         pendingTurn: null,
+        turnFinishedUnseen: false,
         // OpenCode has no run_in_background primitive today (confirmed -
         // its only detached-dispatch shape is "subtask", which PR31 already
         // renders within an active prompt's own event stream) - stays null
@@ -768,6 +784,7 @@ app.post("/api/personas", async (req, res) => {
         lastDenials: [],
         pendingTurn: null,
         backgroundTask: null,
+        turnFinishedUnseen: false,
       };
       wireBackgroundEvents(persona);
     }
@@ -1037,6 +1054,10 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     persona.pendingTurn = null;
     persona.lastActivityTs = Date.now();
     persona.lastDenials = denials;
+    // Same "was Brian actually watching this one" gate as notifyTurnFinished
+    // below - no point flagging a reply as needing review when it just
+    // rendered live in front of him.
+    persona.turnFinishedUnseen = !presence.isWatching(persona.id);
     accumulateUsage(persona, costUsd, usage);
     persona.messages.push({
       role: "assistant",

@@ -65,6 +65,7 @@ body {
   font-size: 10px; font-weight: 600; color: #5ac8fa;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.persona-status.ready { color: #34c759; }
 .ttl-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
 .ttl-dot.green { background: #34c759; }
 .ttl-dot.yellow { background: #ffd60a; }
@@ -74,6 +75,12 @@ body {
 .activity-dot.idle { background: #5a5a5e; }
 .activity-dot.working { background: #0a84ff; animation: activity-pulse 1.2s ease-in-out infinite; }
 .activity-dot.blocked { background: #ff453a; }
+/* Turn finished while Brian wasn't watching this persona - "come look",
+   distinct from both the pulsing-blue working dot and the static-grey idle
+   one it would otherwise be indistinguishable from once a turn completes. */
+.activity-dot.ready { background: #34c759; }
+.persona-item.ready-for-review { border: 1px solid #34c75955; }
+.ready-flag { color: #34c759; font-size: 12px; margin-right: 4px; }
 
 /* A detached background dispatch (symposion-I45) is orthogonal to
    activity-dot (foreground pendingTurn only) - shown alongside it, not
