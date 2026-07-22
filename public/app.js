@@ -9,6 +9,17 @@ let activeStream = null;
 let streamingBubble = null;
 let thinkingBubble = null;
 let latestPersonas = []; // last /api/personas snapshot, kept for sync lookups (e.g. the blocked card)
+// Signature of the pending permission/question currently painted into
+// blockedCardEl, so the 5s refreshPersonas() poll (and the SSE "blocked"
+// event, which also calls refreshPersonas()) doesn't blow away an
+// in-progress selection by unconditionally rebuilding the same request's
+// markup from scratch every time it re-checks.
+let renderedBlockedKey = null;
+// Keydown handler for the active blocked-card, if one is attached - tracked
+// so it can be removed before a new one is attached (avoids stacking
+// listeners across renders/personas) and so submit/reject can silence it
+// immediately to prevent a double-fire from a keypress already in flight.
+let blockedCardKeyHandler = null;
 let stagedAttachments = []; // [{ file: File, localId }] - staged for the NEXT send, cleared after submit
 // Draft (composer text + staged attachments) per persona id, so switching to
 // another persona and back doesn't lose an in-progress message - previously
@@ -376,19 +387,42 @@ handoffBtnEl.addEventListener("click", async () => {
  * personas can have one - claude-code personas surface blocking via
  * lastDenials on the message itself (no live pause, see server/index.mjs).
  */
+function detachBlockedCardKeyHandler() {
+  if (blockedCardKeyHandler) {
+    document.removeEventListener("keydown", blockedCardKeyHandler);
+    blockedCardKeyHandler = null;
+  }
+}
+
 function renderBlockedCard(persona) {
-  if (!persona || (!persona.pendingPermission && !persona.pendingQuestion)) {
-    blockedCardEl.hidden = true;
-    blockedCardEl.innerHTML = "";
+  const key = persona?.pendingPermission
+    ? `perm:${persona.pendingPermission.id}`
+    : persona?.pendingQuestion
+    ? `q:${persona.pendingQuestion.id}`
+    : null;
+
+  if (!key) {
+    if (renderedBlockedKey !== null) {
+      detachBlockedCardKeyHandler();
+      blockedCardEl.hidden = true;
+      blockedCardEl.innerHTML = "";
+      renderedBlockedKey = null;
+    }
     return;
   }
 
+  // Same request already painted (e.g. a poll tick while the user is mid-
+  // selection) - leave the DOM alone so selections/focus survive.
+  if (key === renderedBlockedKey) return;
+  renderedBlockedKey = key;
+  detachBlockedCardKeyHandler();
   blockedCardEl.hidden = false;
 
   if (persona.pendingPermission) {
     const req = persona.pendingPermission;
+    blockedCardEl.className = "blocked-card is-permission";
     blockedCardEl.innerHTML = `
-      <div class="blocked-card-title">⚠ Permission requested</div>
+      <div class="blocked-card-title"><span class="blocked-card-icon">⚠</span> Permission requested</div>
       <div class="blocked-card-detail"><code>${escapeHtml(req.action ?? "")}</code></div>
       ${(req.resources ?? []).map((r) => `<div class="blocked-card-resource">${escapeHtml(r)}</div>`).join("")}
       <div class="blocked-card-actions">
@@ -399,12 +433,14 @@ function renderBlockedCard(persona) {
     `;
     blockedCardEl.querySelectorAll("[data-reply]").forEach((btn) => {
       btn.addEventListener("click", async () => {
+        detachBlockedCardKeyHandler();
         blockedCardEl.querySelectorAll("button").forEach((b) => (b.disabled = true));
         await fetch(`/api/personas/${persona.id}/permission-reply`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ reply: btn.dataset.reply }),
         });
+        renderedBlockedKey = null;
         blockedCardEl.hidden = true;
         blockedCardEl.innerHTML = "";
         await refreshPersonas();
@@ -414,35 +450,50 @@ function renderBlockedCard(persona) {
   }
 
   const req = persona.pendingQuestion;
+  const single = req.questions.length === 1;
   const questionBlocks = req.questions.map((q, qi) => `
     <div class="blocked-card-question" data-qi="${qi}">
+      ${req.questions.length > 1 ? `<div class="blocked-card-progress">Question ${qi + 1} of ${req.questions.length}</div>` : ""}
       <div class="blocked-card-detail">${escapeHtml(q.header)}</div>
       <div class="blocked-card-question-text">${escapeHtml(q.question)}</div>
-      <div class="blocked-card-options">
+      <div class="blocked-card-options ${q.multiple ? "is-multi" : ""}">
         ${q.options.map((o, oi) => `
-          <button type="button" class="blocked-option" data-qi="${qi}" data-oi="${oi}" title="${escapeHtml(o.description)}">${escapeHtml(o.label)}</button>
+          <button type="button" class="blocked-option" data-qi="${qi}" data-oi="${oi}">
+            <span class="blocked-option-mark"></span>
+            <span class="blocked-option-body">
+              <span class="blocked-option-label">${escapeHtml(o.label)}</span>
+              ${o.description ? `<span class="blocked-option-desc">${escapeHtml(o.description)}</span>` : ""}
+            </span>
+            ${single ? `<span class="blocked-option-key">${oi + 1}</span>` : ""}
+          </button>
         `).join("")}
+        ${q.custom ? `
+          <label class="blocked-option blocked-option-custom">
+            <span class="blocked-option-mark"></span>
+            <input type="text" class="blocked-card-custom" data-qi="${qi}" placeholder="Other…" />
+          </label>
+        ` : ""}
       </div>
-      ${q.custom ? `<input type="text" class="blocked-card-custom" data-qi="${qi}" placeholder="Other..." />` : ""}
     </div>
   `).join("");
 
+  blockedCardEl.className = "blocked-card is-question";
   blockedCardEl.innerHTML = `
-    <div class="blocked-card-title">⚠ Question from agent</div>
+    <div class="blocked-card-title"><span class="blocked-card-icon blocked-card-icon-question">?</span> Question from agent</div>
     ${questionBlocks}
     <div class="blocked-card-actions">
-      <button type="button" id="blocked-question-reject" class="blocked-btn deny">Reject</button>
-      <button type="button" id="blocked-question-submit" class="blocked-btn allow">Submit</button>
+      <button type="button" id="blocked-question-reject" class="blocked-btn ghost">Skip</button>
+      <button type="button" id="blocked-question-submit" class="blocked-btn primary">Submit</button>
     </div>
   `;
 
   const selections = req.questions.map(() => new Set());
-  blockedCardEl.querySelectorAll(".blocked-option").forEach((btn) => {
+  blockedCardEl.querySelectorAll(".blocked-option[data-oi]").forEach((btn) => {
     btn.addEventListener("click", () => {
       const qi = Number(btn.dataset.qi);
       const multiple = req.questions[qi].multiple;
       if (!multiple) {
-        blockedCardEl.querySelectorAll(`.blocked-option[data-qi="${qi}"]`).forEach((b) => b.classList.remove("selected"));
+        blockedCardEl.querySelectorAll(`.blocked-option[data-qi="${qi}"][data-oi]`).forEach((b) => b.classList.remove("selected"));
         selections[qi].clear();
       }
       btn.classList.toggle("selected");
@@ -452,19 +503,8 @@ function renderBlockedCard(persona) {
     });
   });
 
-  blockedCardEl.querySelector("#blocked-question-reject").addEventListener("click", async () => {
-    blockedCardEl.querySelectorAll("button").forEach((b) => (b.disabled = true));
-    await fetch(`/api/personas/${persona.id}/question-reply`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reject: true }),
-    });
-    blockedCardEl.hidden = true;
-    blockedCardEl.innerHTML = "";
-    await refreshPersonas();
-  });
-
-  blockedCardEl.querySelector("#blocked-question-submit").addEventListener("click", async () => {
+  const submitBlockedQuestion = async () => {
+    detachBlockedCardKeyHandler();
     const answers = req.questions.map((q, qi) => {
       const customEl = blockedCardEl.querySelector(`.blocked-card-custom[data-qi="${qi}"]`);
       const custom = customEl?.value.trim();
@@ -476,10 +516,51 @@ function renderBlockedCard(persona) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ answers }),
     });
+    renderedBlockedKey = null;
     blockedCardEl.hidden = true;
     blockedCardEl.innerHTML = "";
     await refreshPersonas();
-  });
+  };
+
+  const rejectBlockedQuestion = async () => {
+    detachBlockedCardKeyHandler();
+    blockedCardEl.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    await fetch(`/api/personas/${persona.id}/question-reply`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reject: true }),
+    });
+    renderedBlockedKey = null;
+    blockedCardEl.hidden = true;
+    blockedCardEl.innerHTML = "";
+    await refreshPersonas();
+  };
+
+  blockedCardEl.querySelector("#blocked-question-reject").addEventListener("click", rejectBlockedQuestion);
+  blockedCardEl.querySelector("#blocked-question-submit").addEventListener("click", submitBlockedQuestion);
+
+  // Keyboard shortcuts (mirrors Claude Code's own AskUserQuestion prompt) -
+  // only wired for the common single-question case, since a shared 1-9
+  // shortcut is ambiguous once more than one question is on screen at once.
+  if (single) {
+    blockedCardKeyHandler = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        rejectBlockedQuestion();
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        submitBlockedQuestion();
+      } else if (/^[1-9]$/.test(e.key)) {
+        const oi = Number(e.key) - 1;
+        const optBtn = blockedCardEl.querySelector(`.blocked-option[data-qi="0"][data-oi="${oi}"]`);
+        if (optBtn) {
+          e.preventDefault();
+          optBtn.click();
+        }
+      }
+    };
+    document.addEventListener("keydown", blockedCardKeyHandler);
+  }
 }
 
 function escapeHtml(s) {
