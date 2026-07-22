@@ -20,6 +20,7 @@ const personaDrafts = new Map(); // id -> { text: string, attachments: [{file, l
 
 const personaListEl = document.getElementById("persona-list");
 const chatHeaderTextEl = document.getElementById("chat-header-text");
+const chatSummaryEl = document.getElementById("chat-summary");
 const handoffBtnEl = document.getElementById("handoff-btn");
 const handoffCardEl = document.getElementById("handoff-card");
 const chatMessagesEl = document.getElementById("chat-messages");
@@ -265,7 +266,15 @@ async function refreshPersonas() {
   // whether it happened in this tab just now, or another tab within the last
   // poll interval - without a dedicated "renamed" re-render path.
   if (active) chatHeaderTextEl.textContent = `${active.name} — ${modelLabel(active)} — ${workspaceLabel(active)}`;
+  renderChatSummary(active);
   return personas;
+}
+
+/** Shows/hides the 1-2 sentence "what's being discussed" summary line below the chat header. */
+function renderChatSummary(persona) {
+  const text = persona?.summary?.trim();
+  chatSummaryEl.textContent = text || "";
+  chatSummaryEl.hidden = !text;
 }
 
 /** Enables/disables the whole composer row - used while a persona is handed off to Remote Control. */
@@ -968,6 +977,11 @@ function connectStream(personaId) {
       // already refreshes itself) - re-sync the header/sidebar immediately
       // instead of waiting for the 5s poll.
       refreshPersonas();
+    } else if (evt.type === "summary") {
+      // Conversation summary finished computing async after the turn's own
+      // "done" event already fired (see server updateSummary) - reuse the
+      // same refresh path as "renamed" rather than patching #chat-summary here.
+      refreshPersonas();
     } else if (evt.type === "background") {
       // Low-latency path while this persona's chat is the one currently
       // open - the 5s refreshPersonas() poll would otherwise be the only
@@ -1010,6 +1024,7 @@ async function selectPersona(p) {
   }
   activePersonaId = p.id;
   chatHeaderTextEl.textContent = `${p.name} — ${modelLabel(p)} — ${workspaceLabel(p)}`;
+  renderChatSummary(p);
   renameBtnEl.hidden = false;
   // Force the handoff card to re-render for the newly selected persona even
   // if its cache key happens to match the previous persona's.

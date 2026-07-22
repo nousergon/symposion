@@ -19,11 +19,14 @@
     </aside>
     <main class="chat">
       <div class="chat-header" id="chat-header">
-        <span class="chat-header-title">
-          <span id="chat-header-text">Select or create an agent to begin</span>
-          <button type="button" id="rename-btn" class="icon-btn" title="Rename this agent" hidden>✎</button>
-        </span>
-        <button type="button" id="handoff-btn" class="handoff-btn" title="Hand this session off to Remote Control - continue it from the Claude mobile app or claude.ai/code" hidden>📱 Hand off</button>
+        <div class="chat-header-row">
+          <span class="chat-header-title">
+            <span id="chat-header-text">Select or create an agent to begin</span>
+            <button type="button" id="rename-btn" class="icon-btn" title="Rename this agent" hidden>✎</button>
+          </span>
+          <button type="button" id="handoff-btn" class="handoff-btn" title="Hand this session off to Remote Control - continue it from the Claude mobile app or claude.ai/code" hidden>📱 Hand off</button>
+        </div>
+        <div class="chat-summary" id="chat-summary" hidden></div>
       </div>
       <div class="chat-messages" id="chat-messages"></div>
       <div class="handoff-card" id="handoff-card" hidden></div>
