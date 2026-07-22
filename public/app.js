@@ -29,19 +29,16 @@ const baseDocTitle = document.title;
 let unseenReplyCount = 0;
 let notifyPermissionAsked = false;
 
-function markReplyUnseen(persona, text) {
+// A live in-tab-but-unfocused OS Notification used to be raised here too,
+// but the server now does that job via Web Push (notifyTurnFinished in
+// server/index.mjs, gated on the same "not currently watched" presence
+// signal this tab already reports via sendPresence below) - keeping both
+// would double-notify the exact case this originally covered (tab open,
+// just not focused). The title-prefix stays: it needs no permission grant
+// and is a genuinely different signal (glance at an open tab) than a push.
+function markReplyUnseen() {
   unseenReplyCount += 1;
   document.title = `(${unseenReplyCount}) ${baseDocTitle}`;
-  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
-  const n = new Notification(persona ? `${persona.name} replied` : "symposion", {
-    body: (text || "").slice(0, 200),
-    tag: "symposion-turn-done", // collapses into one notification instead of stacking
-  });
-  n.onclick = () => {
-    window.focus();
-    if (persona) selectPersona(persona);
-    n.close();
-  };
 }
 
 function clearUnseenReplies() {
@@ -53,6 +50,78 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) clearUnseenReplies();
 });
 window.addEventListener("focus", clearUnseenReplies);
+
+// Standard MDN/web.dev VAPID-key conversion - PushManager.subscribe()'s
+// applicationServerKey wants a Uint8Array, the server hands back the
+// URL-safe base64 string web-push's own generate-vapid-keys produces.
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
+  return Uint8Array.from([...raw].map((c) => c.charCodeAt(0)));
+}
+
+/**
+ * Registers this browser/device for server-driven turn-finished push (see
+ * notifyTurnFinished in server/index.mjs) - safe to call repeatedly
+ * (pushManager.subscribe() resolves the existing subscription if already
+ * subscribed with the same key, per spec) so both the "just granted
+ * permission" and "already granted, re-affirm on load" call sites can share
+ * it without tracking whether it already ran this session.
+ */
+async function subscribeWebPush() {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  try {
+    const registration = await navigator.serviceWorker.ready;
+    let subscription = await registration.pushManager.getSubscription();
+    if (!subscription) {
+      const res = await fetch("/api/webpush/vapid-public-key");
+      if (!res.ok) return; // not configured server-side - nothing to subscribe to
+      const { publicKey } = await res.json();
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey),
+      });
+    }
+    await fetch("/api/webpush/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(subscription.toJSON()),
+    });
+  } catch (err) {
+    console.error("[webpush] subscribe failed:", err);
+  }
+}
+
+/**
+ * Presence heartbeat - tells the server which persona (if any) is actually
+ * on screen right now, so notifyTurnFinished can skip the push for a turn
+ * Brian's already watching live and only fire for the cases nothing else
+ * covers (a different persona, or no tab open at all). "Watching" means
+ * visible AND focused - a backgrounded browser window still counts as not
+ * watching even if the tab itself is the frontmost one in that window.
+ */
+function sendPresence() {
+  const watching = !document.hidden && document.hasFocus() ? activePersonaId : null;
+  fetch("/api/presence", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ personaId: watching }),
+  }).catch(() => {}); // best-effort - a dropped heartbeat just means the next one (or the TTL) catches up
+}
+document.addEventListener("visibilitychange", sendPresence);
+window.addEventListener("focus", sendPresence);
+window.addEventListener("blur", sendPresence);
+// pagehide fires reliably on tab/window close (including mobile) unlike
+// beforeunload - sendBeacon so the request survives the page already being
+// torn down. Explicitly clears presence rather than relying solely on the
+// server-side PRESENCE_TTL_MS backstop, so a closed tab stops suppressing
+// pushes immediately instead of up to a minute late.
+window.addEventListener("pagehide", () => {
+  navigator.sendBeacon?.("/api/presence", new Blob([JSON.stringify({ personaId: null })], { type: "application/json" }));
+});
+setInterval(sendPresence, 20000); // backstop for a long-idle tab with no visibility/focus events to fire off
 
 let stagedAttachments = []; // [{ file: File, localId }] - staged for the NEXT send, cleared after submit
 // Draft (composer text + staged attachments) per persona id, so switching to
@@ -278,6 +347,7 @@ async function deletePersona(p) {
 
   if (p.id === activePersonaId) {
     activePersonaId = null;
+    sendPresence();
     if (activeStream) { activeStream.close(); activeStream = null; }
     chatHeaderTextEl.textContent = "Select or create an agent to begin";
     renameBtnEl.hidden = true;
@@ -1089,7 +1159,7 @@ function connectStream(personaId) {
       // place to catch the case where the reply itself was a question and
       // Brian wasn't looking at the tab when it landed.
       if (document.hidden || !document.hasFocus()) {
-        markReplyUnseen(latestPersonas.find((p) => p.id === personaId), evt.text);
+        markReplyUnseen();
       }
       refreshPersonas();
     } else if (evt.type === "blocked" || evt.type === "unblocked") {
@@ -1146,6 +1216,7 @@ async function selectPersona(p) {
     personaDrafts.set(activePersonaId, { text: chatTextEl.value, attachments: stagedAttachments });
   }
   activePersonaId = p.id;
+  sendPresence();
   chatHeaderTextEl.textContent = `${p.name} — ${modelLabel(p)} — ${workspaceLabel(p)}`;
   renderChatSummary(p);
   renameBtnEl.hidden = false;
@@ -1506,7 +1577,9 @@ chatFormEl.addEventListener("submit", async (e) => {
   // unprompted permission dialog on page load.
   if (!notifyPermissionAsked && typeof Notification !== "undefined" && Notification.permission === "default") {
     notifyPermissionAsked = true;
-    Notification.requestPermission();
+    Notification.requestPermission().then((perm) => {
+      if (perm === "granted") subscribeWebPush();
+    });
   }
   const text = chatTextEl.value.trim();
   if ((!text && stagedAttachments.length === 0) || !activePersonaId) return;
@@ -1560,6 +1633,16 @@ chatFormEl.addEventListener("submit", async (e) => {
     body: JSON.stringify({ text, attachments }),
   });
 });
+
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/sw.js").catch((err) => console.error("[webpush] service worker registration failed:", err));
+}
+// Re-affirm the subscription on load for a returning user who already
+// granted permission in a past session - the first-message-send path only
+// covers a FRESH grant, not this case.
+if (typeof Notification !== "undefined" && Notification.permission === "granted") {
+  subscribeWebPush();
+}
 
 (async () => {
   providers = await fetchProviders();

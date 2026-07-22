@@ -8,7 +8,9 @@ import QRCode from "qrcode";
 import { ClaudeCodeSession, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, CLAUDE_BIN } from "./claude-code-backend.mjs";
 import { ensureWorkspaceTrusted, startRemoteControl, stopRemoteControl, isProcessAlive, importRemoteTurns } from "./remote-control.mjs";
 import { OpenCodeServerPool } from "./opencode-pool.mjs";
-import { loadPersonas, savePersonas, toRecord, saveAttachment, attachmentFilePath, ATTACHMENTS_DIR, loadSettings, saveSettings } from "./store.mjs";
+import { loadPersonas, savePersonas, toRecord, saveAttachment, attachmentFilePath, ATTACHMENTS_DIR, loadSettings, saveSettings, addPushSubscription, getPushSubscriptions, removePushSubscription } from "./store.mjs";
+import { getVapidPublicKey, sendPush } from "./webpush.mjs";
+import { createPresenceTracker } from "./presence.mjs";
 import { isGitRepo, createIsolatedWorktree, removeWorktreeAndBranch } from "./worktree.mjs";
 import { randomStarName } from "./star-names.mjs";
 import { SseHub } from "./sse-hub.mjs";
@@ -94,6 +96,33 @@ const personas = new Map();
 
 function persistAll() {
   savePersonas([...personas.values()].map(toRecord));
+}
+
+// See presence.mjs for what this tracks and why - in short, it's what lets
+// notifyTurnFinished below fire only when Brian isn't already watching the
+// persona that just replied, instead of pushing on every single turn.
+const presence = createPresenceTracker();
+
+/**
+ * Fire-and-forget Web Push fan-out for a turn that just finished - see
+ * presence.mjs for why this only fires when the finishing persona isn't the
+ * one Brian's actively watching. Never awaited by the caller (same pattern
+ * as updateSummary below): a push failure or a slow push-service round-trip
+ * must never delay the turn's own HTTP response.
+ */
+async function notifyTurnFinished(persona, replyText) {
+  if (presence.isWatching(persona.id)) return;
+  const subs = getPushSubscriptions();
+  if (subs.length === 0) return;
+  const payload = {
+    title: `${persona.name} replied`,
+    body: (replyText || "").slice(0, 200),
+    tag: "symposion-turn-done",
+  };
+  await Promise.all(subs.map(async (sub) => {
+    const { expired } = await sendPush(sub, payload);
+    if (expired) removePushSubscription(sub.endpoint);
+  }));
 }
 
 for (const record of loadPersonas()) {
@@ -585,6 +614,31 @@ app.get("/api/random-name", (req, res) => {
   res.json({ name: randomStarName([...personas.values()].map((p) => p.name)) });
 });
 
+app.get("/api/webpush/vapid-public-key", async (req, res) => {
+  const publicKey = await getVapidPublicKey();
+  if (!publicKey) return res.status(404).json({ error: "web push not configured" });
+  res.json({ publicKey });
+});
+
+// Body is the browser's raw PushSubscription.toJSON() object - stored
+// verbatim, deduped by endpoint (see store.mjs's addPushSubscription).
+app.post("/api/webpush/subscribe", (req, res) => {
+  const subscription = req.body;
+  if (!subscription?.endpoint || !subscription?.keys?.p256dh || !subscription?.keys?.auth) {
+    return res.status(400).json({ error: "invalid PushSubscription" });
+  }
+  addPushSubscription(subscription);
+  res.status(204).end();
+});
+
+// Client presence heartbeat - see the `presence`/isBeingWatched doc comment
+// above for what this drives. personaId: null means "not currently
+// watching anything" (tab hidden/unfocused, or no persona selected).
+app.post("/api/presence", (req, res) => {
+  presence.update(req.body?.personaId);
+  res.status(204).end();
+});
+
 /**
  * Restarts the server process in place, so a UI button can pick up a fresh
  * `git pull` without needing Activity Monitor / launchctl. Relies entirely
@@ -928,6 +982,7 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     // Fire-and-forget: never await, and never let this delay the turn's own
     // response - see updateSummary's doc comment for why it's safe to ignore.
     updateSummary(persona);
+    notifyTurnFinished(persona, replyText);
 
     res.json({ persona: personaSummary(persona), reply: replyText, denials, parts, costUsd, usage });
   } catch (err) {
