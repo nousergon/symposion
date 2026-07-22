@@ -14,10 +14,10 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@aws-sdk/client-ssm": "^3.1087.0",
-    "@opencode-ai/sdk": "^1.18.2",
+    "@aws-sdk/client-ssm": "^3.1092.0",
+    "@opencode-ai/sdk": "^1.18.4",
     "express": "^5.2.1",
-    "opencode-ai": "^1.18.2",
+    "opencode-ai": "^1.18.4",
     "qrcode": "^1.5.4"
   }
 }
