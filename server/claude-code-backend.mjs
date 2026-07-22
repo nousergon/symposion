@@ -61,6 +61,19 @@ export const CLAUDE_PERMISSION_MODES = [
   { value: "plan", name: "Plan mode" },
 ];
 
+// The claude CLI's own --effort choices (verified via `claude --help`).
+// null/omitted means "let the CLI pick its own default" rather than
+// symposion hardcoding an assumption about what that default is - same
+// null-means-CLI-default convention as CLAUDE_PERMISSION_MODES above.
+export const CLAUDE_EFFORT_LEVELS = [
+  { value: "", name: "Auto (CLI default)" },
+  { value: "low", name: "Low" },
+  { value: "medium", name: "Medium" },
+  { value: "high", name: "High" },
+  { value: "xhigh", name: "XHigh" },
+  { value: "max", name: "Max" },
+];
+
 // Text/code mimes get sent as an Anthropic "document" block with a plain-text
 // source rather than base64 - decoding to UTF-8 text lets the model read the
 // content directly instead of round-tripping through a PDF-style opaque blob,
@@ -94,8 +107,11 @@ export class ClaudeCodeSession {
    * @param {string|null} [permissionMode] - one of CLAUDE_PERMISSION_MODES'
    *   values, or null/"" to omit --permission-mode entirely and let the CLI
    *   resolve its own default.
+   * @param {string|null} [effortLevel] - one of CLAUDE_EFFORT_LEVELS' values,
+   *   or null/"" to omit --effort entirely and let the CLI resolve its own
+   *   default.
    */
-  constructor(sessionId, model, personaName, workspaceDir, resume = false, permissionMode = null) {
+  constructor(sessionId, model, personaName, workspaceDir, resume = false, permissionMode = null, effortLevel = null) {
     this.sessionId = sessionId;
     this.model = model;
     this.alive = true;
@@ -126,6 +142,7 @@ export class ClaudeCodeSession {
 
     const sessionArgs = resume ? ["--resume", sessionId] : ["--session-id", sessionId];
     const permissionArgs = permissionMode ? ["--permission-mode", permissionMode] : [];
+    const effortArgs = effortLevel ? ["--effort", effortLevel] : [];
 
     this.proc = spawn(CLAUDE_BIN, [
       "-p",
@@ -137,6 +154,7 @@ export class ClaudeCodeSession {
       "--model", model,
       "--append-system-prompt", identityPrompt,
       ...permissionArgs,
+      ...effortArgs,
     ], { cwd: workspaceDir, stdio: ["pipe", "pipe", "pipe"] });
 
     // Per-turn content-block-index -> type ("text" | "thinking" | ...), so we

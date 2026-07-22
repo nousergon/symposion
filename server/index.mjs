@@ -5,7 +5,7 @@ import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
-import { ClaudeCodeSession, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, CLAUDE_BIN } from "./claude-code-backend.mjs";
+import { ClaudeCodeSession, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, CLAUDE_EFFORT_LEVELS, CLAUDE_BIN } from "./claude-code-backend.mjs";
 import { ensureWorkspaceTrusted, startRemoteControl, stopRemoteControl, isProcessAlive, importRemoteTurns } from "./remote-control.mjs";
 import { OpenCodeServerPool } from "./opencode-pool.mjs";
 import { loadPersonas, savePersonas, toRecord, saveAttachment, attachmentFilePath, ATTACHMENTS_DIR, loadSettings, saveSettings, addPushSubscription, getPushSubscriptions, removePushSubscription } from "./store.mjs";
@@ -229,7 +229,7 @@ async function ensureConnected(persona) {
     // Reconnect to the SAME worktree/cwd used originally - never re-derive
     // or re-create one on reconnect, or every restart would leak a new
     // worktree+branch for the same persona.
-    persona.claudeSession = new ClaudeCodeSession(persona.id, persona.modelID, persona.name, persona.actualCwd, resuming, persona.permissionMode);
+    persona.claudeSession = new ClaudeCodeSession(persona.id, persona.modelID, persona.name, persona.actualCwd, resuming, persona.permissionMode, persona.effortLevel);
     wireBackgroundEvents(persona);
   } else {
     // Runs on every call, not just first-connect: an egress proxy is a
@@ -512,6 +512,7 @@ function personaSummary(p) {
     isolated: p.isolated ?? false,
     worktreeBranch: p.worktreeBranch ?? null,
     permissionMode: p.permissionMode ?? null,
+    effortLevel: p.effortLevel ?? null,
     ttlRemainingMs: remainingMs,
     ttlStatus: status,
     ttlApproximate: p.backend !== "claude-code",
@@ -601,6 +602,10 @@ app.get("/api/claude-permission-modes", (req, res) => {
   res.json(CLAUDE_PERMISSION_MODES);
 });
 
+app.get("/api/claude-effort-levels", (req, res) => {
+  res.json(CLAUDE_EFFORT_LEVELS);
+});
+
 app.get("/api/defaults", (req, res) => {
   res.json({ apiDefault: API_DEFAULT, claudeCodeDefault: CLAUDE_CODE_DEFAULT, defaultWorkspace: DEFAULT_WORKSPACE, lastRecipe });
 });
@@ -667,7 +672,7 @@ function resolveWorkspaceDir(raw) {
 
 app.post("/api/personas", async (req, res) => {
   try {
-    const { backend, providerID, modelID, permissionMode } = req.body ?? {};
+    const { backend, providerID, modelID, permissionMode, effortLevel } = req.body ?? {};
     // A name is never required to create a persona - an untyped/blank field
     // just gets a random star name, excluding whatever's already in use.
     const name = (req.body?.name ?? "").trim() || randomStarName([...personas.values()].map((p) => p.name));
@@ -678,6 +683,9 @@ app.post("/api/personas", async (req, res) => {
     if (!modelID) return res.status(400).json({ error: "modelID is required" });
     if (permissionMode && !CLAUDE_PERMISSION_MODES.some((m) => m.value === permissionMode)) {
       return res.status(400).json({ error: `unrecognized permissionMode: ${permissionMode}` });
+    }
+    if (effortLevel && !CLAUDE_EFFORT_LEVELS.some((m) => m.value === effortLevel)) {
+      return res.status(400).json({ error: `unrecognized effortLevel: ${effortLevel}` });
     }
     if (!path.isAbsolute(workspaceDir)) {
       return res.status(400).json({ error: `workspaceDir must be an absolute path (or start with ~): ${req.body?.workspaceDir}` });
@@ -748,10 +756,11 @@ app.post("/api/personas", async (req, res) => {
         worktreeBranch = wt.branch;
       }
 
-      const claudeSession = new ClaudeCodeSession(id, modelID, name, actualCwd, false, permissionMode || null);
+      const claudeSession = new ClaudeCodeSession(id, modelID, name, actualCwd, false, permissionMode || null, effortLevel || null);
       persona = {
         id, name, backend, modelID, workspaceDir, actualCwd, isolated, worktreeBranch,
         permissionMode: permissionMode || null,
+        effortLevel: effortLevel || null,
         claudeSession,
         lastActivityTs: Date.now(),
         messages: [],
@@ -770,7 +779,7 @@ app.post("/api/personas", async (req, res) => {
     // deliberately excluded - each new agent is typically for a different
     // repo, so carrying it forward would be a wrong-more-often-than-right
     // default rather than a helpful one).
-    lastRecipe = { backend, providerID: providerID ?? null, modelID, permissionMode: permissionMode ?? null };
+    lastRecipe = { backend, providerID: providerID ?? null, modelID, permissionMode: permissionMode ?? null, effortLevel: effortLevel ?? null };
     settings.lastRecipe = lastRecipe;
     saveSettings(settings);
 
@@ -861,6 +870,12 @@ app.delete("/api/personas/:id", async (req, res) => {
  * Never done mid-turn (pendingTurn guard below) or while handed off to
  * Remote Control (that live process, not claudeSession, is the session -
  * same rule ensureConnected/the handoff endpoint already enforce).
+ *
+ * effortLevel (claude-code only - no api-backend equivalent exists today)
+ * follows the identical pinned-at-spawn/kill+respawn path as model, for the
+ * same reason: it's baked into the CLI subprocess via --effort at spawn
+ * time, so changing it needs the same respawn as a model switch, gated by
+ * the same pendingTurn/handoff checks.
  */
 app.patch("/api/personas/:id", async (req, res) => {
   const persona = personas.get(req.params.id);
@@ -870,34 +885,40 @@ app.patch("/api/personas/:id", async (req, res) => {
 
   const modelID = req.body?.modelID;
   const providerID = req.body?.providerID;
+  const effortLevel = req.body?.effortLevel;
   const modelChanged = !!modelID && modelID !== persona.modelID;
   const providerChanged = persona.backend === "api" && !!providerID && providerID !== persona.providerID;
+  const effortChanged = persona.backend === "claude-code" && effortLevel !== undefined && (effortLevel || null) !== (persona.effortLevel || null);
+  const needsRespawn = persona.backend === "claude-code" && (modelChanged || effortChanged);
 
   if (persona.backend === "api" && modelChanged && !providerID) {
     return res.status(400).json({ error: "providerID is required when changing model for an api-backend persona" });
   }
-  if (persona.backend === "claude-code" && modelChanged) {
+  if (effortLevel && !CLAUDE_EFFORT_LEVELS.some((m) => m.value === effortLevel)) {
+    return res.status(400).json({ error: `unrecognized effortLevel: ${effortLevel}` });
+  }
+  if (needsRespawn) {
     if (persona.pendingTurn) {
-      return res.status(409).json({ error: "a turn is still in flight - wait for it to finish before changing the model" });
+      return res.status(409).json({ error: "a turn is still in flight - wait for it to finish before changing the model or effort" });
     }
     if (persona.handoff) {
-      return res.status(409).json({ error: "persona is handed off to Remote Control - reclaim it before changing the model" });
+      return res.status(409).json({ error: "persona is handed off to Remote Control - reclaim it before changing the model or effort" });
     }
   }
 
   persona.name = name;
+  if (effortChanged) persona.effortLevel = effortLevel || null;
   if (modelChanged || providerChanged) {
     persona.modelID = modelID;
-    if (persona.backend === "api") {
-      persona.providerID = providerID;
-    } else {
-      try {
-        if (persona.claudeSession?.alive) persona.claudeSession.kill();
-        await ensureConnected(persona);
-      } catch (err) {
-        console.error(`[model-switch:${persona.id}] failed to respawn with new model:`, err);
-        return res.status(500).json({ error: `model switch failed: ${err.message}` });
-      }
+    if (persona.backend === "api") persona.providerID = providerID;
+  }
+  if (needsRespawn) {
+    try {
+      if (persona.claudeSession?.alive) persona.claudeSession.kill();
+      await ensureConnected(persona);
+    } catch (err) {
+      console.error(`[model-switch:${persona.id}] failed to respawn with new model/effort:`, err);
+      return res.status(500).json({ error: `model/effort switch failed: ${err.message}` });
     }
   }
   persistAll();

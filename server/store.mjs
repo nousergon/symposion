@@ -126,6 +126,7 @@ export function toRecord(p) {
     worktreeBranch: p.worktreeBranch ?? null,
     sessionID: p.sessionID ?? p.id, // claude-code personas: sessionID === persona id
     permissionMode: p.permissionMode ?? null, // claude-code only; null = CLI's own default (currently "auto")
+    effortLevel: p.effortLevel ?? null, // claude-code only; null = CLI's own default
     lastActivityTs: p.lastActivityTs,
     // Live Remote Control handoff state ({ url, pid, startedAt } or null) -
     // persisted so a symposion restart doesn't orphan a handed-off persona:

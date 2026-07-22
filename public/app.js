@@ -2,6 +2,7 @@ let activePersonaId = null;
 let providers = [];
 let claudeModels = [];
 let permissionModes = [];
+let effortLevels = [];
 let defaults = null;
 let dirBrowserPath = null; // current directory shown in the workspace picker modal
 let selectedBackend = "api";
@@ -153,6 +154,8 @@ const renameBtnEl = document.getElementById("rename-btn");
 const editModalEl = document.getElementById("edit-agent-modal");
 const editNameEl = document.getElementById("edit-agent-name");
 const editModelEl = document.getElementById("edit-agent-model");
+const editEffortLabelEl = document.getElementById("edit-agent-effort-label");
+const editEffortModeEl = document.getElementById("edit-agent-effort-mode");
 const editCancelEl = document.getElementById("edit-agent-cancel");
 const editSaveEl = document.getElementById("edit-agent-save");
 let editingPersonaId = null;
@@ -166,6 +169,8 @@ const modalCreateEl = document.getElementById("new-agent-create");
 const modalWorkspaceEl = document.getElementById("new-agent-workspace");
 const modalPermissionLabelEl = document.getElementById("new-agent-permission-label");
 const modalPermissionModeEl = document.getElementById("new-agent-permission-mode");
+const modalEffortLabelEl = document.getElementById("new-agent-effort-label");
+const modalEffortModeEl = document.getElementById("new-agent-effort-mode");
 const backendBtns = [...document.querySelectorAll(".backend-btn")];
 
 const browseBtn = document.getElementById("new-agent-browse-btn");
@@ -209,6 +214,11 @@ async function fetchClaudeModels() {
 
 async function fetchPermissionModes() {
   const res = await fetch("/api/claude-permission-modes");
+  return res.json();
+}
+
+async function fetchEffortLevels() {
+  const res = await fetch("/api/claude-effort-levels");
   return res.json();
 }
 
@@ -335,11 +345,13 @@ function renderPersonaList(personas) {
 async function editPersona(p) {
   if (providers.length === 0) providers = await fetchProviders();
   if (claudeModels.length === 0) claudeModels = await fetchClaudeModels();
+  if (effortLevels.length === 0) effortLevels = await fetchEffortLevels();
   if (!defaults) defaults = await fetchDefaults();
 
   editingPersonaId = p.id;
   editNameEl.value = p.name;
   populateModelSelect(p.modelID, p.providerID, editModelEl, p.backend);
+  populateEffortLevelSelect(editEffortModeEl, editEffortLabelEl, p.backend, p.effortLevel);
   editModalEl.hidden = false;
   editNameEl.focus();
   editNameEl.select();
@@ -355,6 +367,10 @@ editSaveEl.addEventListener("click", async () => {
   const modelID = editModelEl.value;
   const body = { name, modelID };
   if (p.backend === "api") body.providerID = editModelEl.selectedOptions[0]?.dataset.providerId;
+  // Always send effortLevel for claude-code personas (never omit) - an
+  // empty-string value means "explicit auto", letting a user revert to the
+  // CLI's own default, not just move between named levels.
+  else body.effortLevel = editEffortModeEl.value;
 
   const res = await fetch(`/api/personas/${p.id}`, {
     method: "PATCH",
@@ -1383,12 +1399,37 @@ function populatePermissionModeSelect(preferredValue) {
   if (preferredValue && permissionModes.some((m) => m.value === preferredValue)) modalPermissionModeEl.value = preferredValue;
 }
 
+/**
+ * Effort level only applies to claude-code personas - the `claude` CLI's
+ * own --effort flag; no api-backend (OpenCode/DeepSeek/xAI) equivalent
+ * exists today. Shared between the New Agent modal (backend still
+ * switchable, selectEl/labelEl/backend default to that modal's own
+ * elements/selectedBackend) and the Edit Agent modal (backend is immutable
+ * per persona, so the caller passes p.backend explicitly) - unlike
+ * populatePermissionModeSelect, which only the New Agent modal needs today.
+ */
+function populateEffortLevelSelect(selectEl = modalEffortModeEl, labelEl = modalEffortLabelEl, backend = selectedBackend, preferredValue) {
+  const show = backend === "claude-code";
+  labelEl.hidden = !show;
+  selectEl.hidden = !show;
+  if (!show) return;
+  selectEl.innerHTML = "";
+  for (const m of effortLevels) {
+    const opt = document.createElement("option");
+    opt.value = m.value;
+    opt.textContent = m.name;
+    selectEl.appendChild(opt);
+  }
+  if (preferredValue && effortLevels.some((m) => m.value === preferredValue)) selectEl.value = preferredValue;
+}
+
 backendBtns.forEach((btn) => {
   btn.addEventListener("click", () => {
     selectedBackend = btn.dataset.backend;
     backendBtns.forEach((b) => b.classList.toggle("active", b === btn));
     populateModelSelect();
     populatePermissionModeSelect();
+    populateEffortLevelSelect();
   });
 });
 
@@ -1478,6 +1519,7 @@ newAgentBtn.addEventListener("click", async () => {
   if (providers.length === 0) providers = await fetchProviders();
   if (claudeModels.length === 0) claudeModels = await fetchClaudeModels();
   if (permissionModes.length === 0) permissionModes = await fetchPermissionModes();
+  if (effortLevels.length === 0) effortLevels = await fetchEffortLevels();
   defaults = await fetchDefaults(); // re-fetch every open, not just once - lastRecipe changes as agents get created
 
   // Prefill from the most recently created agent's recipe instead of always
@@ -1488,6 +1530,7 @@ newAgentBtn.addEventListener("click", async () => {
   backendBtns.forEach((b) => b.classList.toggle("active", b.dataset.backend === selectedBackend));
   populateModelSelect(recipe?.modelID, recipe?.providerID);
   populatePermissionModeSelect(recipe?.permissionMode);
+  populateEffortLevelSelect(modalEffortModeEl, modalEffortLabelEl, selectedBackend, recipe?.effortLevel);
   modalWorkspaceEl.value = defaults?.defaultWorkspace ?? "";
   // No name is ever required - prefill with a random star name (editable,
   // and re-rollable via the dice button) rather than leaving it blank.
@@ -1513,8 +1556,12 @@ modalCreateEl.addEventListener("click", async () => {
   const workspaceDir = modalWorkspaceEl.value;
 
   const body = { name, backend: selectedBackend, modelID, workspaceDir };
-  if (selectedBackend === "api") body.providerID = modalModelEl.selectedOptions[0]?.dataset.providerId;
-  else if (modalPermissionModeEl.value) body.permissionMode = modalPermissionModeEl.value;
+  if (selectedBackend === "api") {
+    body.providerID = modalModelEl.selectedOptions[0]?.dataset.providerId;
+  } else {
+    if (modalPermissionModeEl.value) body.permissionMode = modalPermissionModeEl.value;
+    if (modalEffortModeEl.value) body.effortLevel = modalEffortModeEl.value;
+  }
 
   const res = await fetch("/api/personas", {
     method: "POST",
