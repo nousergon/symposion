@@ -832,16 +832,35 @@ app.delete("/api/personas/:id", async (req, res) => {
 });
 
 /**
- * Renames a persona - possible at any time, not just at creation. Cosmetic
- * everywhere (sidebar/header/storage) update immediately here. Identity
- * (the model's own belief about its name) updates on different timelines per
- * backend: an api-backend (OpenCode) persona resends its system prompt fresh
- * on every single message (see promptOpenCodeStreaming's `system:` line
- * below), so it picks up the new name on the very next turn; a claude-code
- * persona's identity is baked into --append-system-prompt once at process
- * spawn (claude-code-backend.mjs), so it only self-identifies under the new
- * name after its next reconnect/resume - respawning it here to force an
- * immediate update would kill whatever turn might be in flight.
+ * Renames a persona and/or switches its model - both possible at any time,
+ * not just at creation. Cosmetic everywhere (sidebar/header/storage) updates
+ * immediately here. Identity (the model's own belief about its name) updates
+ * on different timelines per backend: an api-backend (OpenCode) persona
+ * resends its system prompt fresh on every single message (see
+ * promptOpenCodeStreaming's `system:` line below), so it picks up the new
+ * name on the very next turn; a claude-code persona's identity is baked into
+ * --append-system-prompt once at process spawn (claude-code-backend.mjs), so
+ * it only self-identifies under the new name after its next reconnect/resume
+ * - respawning it here to force an immediate update would kill whatever turn
+ * might be in flight.
+ *
+ * Model/provider switch follows the same asymmetry, for the same reason
+ * promptOpenCodeStreaming/ClaudeCodeSession are shaped the way they are:
+ * an api-backend persona reads persona.modelID/providerID fresh on every
+ * turn (same `system:` line above), so just writing the new fields here is
+ * enough - no respawn, and ensureConnected() re-checks the target provider's
+ * egress proxy on every message regardless of connection state, so a
+ * provider switch (e.g. deepseek -> xai) needs nothing further either. A
+ * claude-code persona's model is pinned into the CLI subprocess at spawn
+ * (ClaudeCodeSession's constructor), so switching it requires killing the
+ * live session and respawning it via the exact same resume-by-message-
+ * history path ensureConnected() already uses to reconnect after a server
+ * restart - done synchronously here (not deferred to the next message)
+ * specifically so personaSummary().alive doesn't flash a misleading
+ * "(crashed)" state in the sidebar between this response and the next turn.
+ * Never done mid-turn (pendingTurn guard below) or while handed off to
+ * Remote Control (that live process, not claudeSession, is the session -
+ * same rule ensureConnected/the handoff endpoint already enforce).
  */
 app.patch("/api/personas/:id", async (req, res) => {
   const persona = personas.get(req.params.id);
@@ -849,7 +868,38 @@ app.patch("/api/personas/:id", async (req, res) => {
   const name = (req.body?.name ?? "").trim();
   if (!name) return res.status(400).json({ error: "name is required" });
 
+  const modelID = req.body?.modelID;
+  const providerID = req.body?.providerID;
+  const modelChanged = !!modelID && modelID !== persona.modelID;
+  const providerChanged = persona.backend === "api" && !!providerID && providerID !== persona.providerID;
+
+  if (persona.backend === "api" && modelChanged && !providerID) {
+    return res.status(400).json({ error: "providerID is required when changing model for an api-backend persona" });
+  }
+  if (persona.backend === "claude-code" && modelChanged) {
+    if (persona.pendingTurn) {
+      return res.status(409).json({ error: "a turn is still in flight - wait for it to finish before changing the model" });
+    }
+    if (persona.handoff) {
+      return res.status(409).json({ error: "persona is handed off to Remote Control - reclaim it before changing the model" });
+    }
+  }
+
   persona.name = name;
+  if (modelChanged || providerChanged) {
+    persona.modelID = modelID;
+    if (persona.backend === "api") {
+      persona.providerID = providerID;
+    } else {
+      try {
+        if (persona.claudeSession?.alive) persona.claudeSession.kill();
+        await ensureConnected(persona);
+      } catch (err) {
+        console.error(`[model-switch:${persona.id}] failed to respawn with new model:`, err);
+        return res.status(500).json({ error: `model switch failed: ${err.message}` });
+      }
+    }
+  }
   persistAll();
 
   if (persona.backend === "api" && persona.opencodeEntry) {

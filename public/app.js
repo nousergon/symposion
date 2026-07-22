@@ -150,6 +150,13 @@ const blockedCardEl = document.getElementById("blocked-card");
 const backgroundCardEl = document.getElementById("background-task-card");
 const renameBtnEl = document.getElementById("rename-btn");
 
+const editModalEl = document.getElementById("edit-agent-modal");
+const editNameEl = document.getElementById("edit-agent-name");
+const editModelEl = document.getElementById("edit-agent-model");
+const editCancelEl = document.getElementById("edit-agent-cancel");
+const editSaveEl = document.getElementById("edit-agent-save");
+let editingPersonaId = null;
+
 const modalEl = document.getElementById("new-agent-modal");
 const modalNameEl = document.getElementById("new-agent-name");
 const modalRandomizeNameEl = document.getElementById("new-agent-randomize-name");
@@ -303,13 +310,13 @@ function renderPersonaList(personas) {
         ${status ? `<span class="persona-status">${status}</span>` : ""}
       </span>
       <span class="ttl-label" title="${p.ttlApproximate ? "Approximate - real cache window unknown for this provider" : "Confirmed 1-hour ephemeral cache window"}">${ttlLabel(p)}</span>
-      <button type="button" class="persona-rename" title="Rename agent" data-id="${p.id}">✎</button>
+      <button type="button" class="persona-rename" title="Edit agent (name/model)" data-id="${p.id}">✎</button>
       <button type="button" class="persona-delete" title="Delete agent" data-id="${p.id}">×</button>
     `;
     li.addEventListener("click", () => selectPersona(p));
     li.querySelector(".persona-rename").addEventListener("click", (e) => {
       e.stopPropagation();
-      renamePersona(p);
+      editPersona(p);
     });
     li.querySelector(".persona-delete").addEventListener("click", (e) => {
       e.stopPropagation();
@@ -319,25 +326,49 @@ function renderPersonaList(personas) {
   }
 }
 
-/** Rename is possible at any time, not just at creation - prompt() mirrors the existing confirm()-based delete flow rather than adding a whole inline-edit UI for one text field. */
-async function renamePersona(p) {
-  const next = prompt("Rename agent:", p.name);
-  if (next === null) return;
-  const name = next.trim();
-  if (!name || name === p.name) return;
+/**
+ * Opens the Edit Agent modal, prefilled with this persona's current name and
+ * model - possible at any time, not just at creation. Replaces the old
+ * prompt()-based rename-only flow now that model is editable too (a second
+ * text field doesn't fit a single prompt()).
+ */
+async function editPersona(p) {
+  if (providers.length === 0) providers = await fetchProviders();
+  if (claudeModels.length === 0) claudeModels = await fetchClaudeModels();
+  if (!defaults) defaults = await fetchDefaults();
+
+  editingPersonaId = p.id;
+  editNameEl.value = p.name;
+  populateModelSelect(p.modelID, p.providerID, editModelEl, p.backend);
+  editModalEl.hidden = false;
+  editNameEl.focus();
+  editNameEl.select();
+}
+
+editCancelEl.addEventListener("click", () => { editModalEl.hidden = true; });
+
+editSaveEl.addEventListener("click", async () => {
+  const p = latestPersonas.find((pp) => pp.id === editingPersonaId);
+  if (!p) { editModalEl.hidden = true; return; }
+
+  const name = editNameEl.value.trim() || p.name;
+  const modelID = editModelEl.value;
+  const body = { name, modelID };
+  if (p.backend === "api") body.providerID = editModelEl.selectedOptions[0]?.dataset.providerId;
 
   const res = await fetch(`/api/personas/${p.id}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     const data = await res.json();
-    alert(`Rename failed: ${data.error}`);
+    alert(`Edit failed: ${data.error}`);
     return;
   }
+  editModalEl.hidden = true;
   await refreshPersonas();
-}
+});
 
 async function deletePersona(p) {
   if (!confirm(`Delete "${p.name}"? This fully winds down its backend (kills the process, removes its worktree/branch or OpenCode session) - not reversible.`)) return;
@@ -464,7 +495,7 @@ function renderHandoffState(persona) {
 
 renameBtnEl.addEventListener("click", () => {
   const active = latestPersonas.find((p) => p.id === activePersonaId);
-  if (active) renamePersona(active);
+  if (active) editPersona(active);
 });
 
 handoffBtnEl.addEventListener("click", async () => {
@@ -1287,22 +1318,28 @@ async function loadMessages() {
 }
 
 /**
- * preferredModelID/preferredProviderID (from defaults.lastRecipe) win over
+ * preferredModelID/preferredProviderID (from defaults.lastRecipe, or an
+ * existing persona's current model when called from editPersona) win over
  * the hardcoded CLAUDE_CODE_DEFAULT/API_DEFAULT when present and still a
  * valid option - lets the New Agent modal default to whatever recipe was
  * last used instead of always resetting to the same fixed model.
+ *
+ * selectEl/backend default to the New Agent modal's own <select> and the
+ * module-level selectedBackend toggle; editPersona passes the Edit Agent
+ * modal's <select> and the target persona's (immutable) backend instead, so
+ * both modals share this one population routine rather than duplicating it.
  */
-function populateModelSelect(preferredModelID, preferredProviderID) {
-  modalModelEl.innerHTML = "";
-  if (selectedBackend === "claude-code") {
+function populateModelSelect(preferredModelID, preferredProviderID, selectEl = modalModelEl, backend = selectedBackend) {
+  selectEl.innerHTML = "";
+  if (backend === "claude-code") {
     for (const m of claudeModels) {
       const opt = document.createElement("option");
       opt.value = m.modelID;
       opt.textContent = m.name;
-      modalModelEl.appendChild(opt);
+      selectEl.appendChild(opt);
     }
     const preferred = preferredModelID && claudeModels.some((m) => m.modelID === preferredModelID);
-    modalModelEl.value = preferred ? preferredModelID : defaults.claudeCodeDefault.modelID;
+    selectEl.value = preferred ? preferredModelID : defaults.claudeCodeDefault.modelID;
   } else {
     // Matched by (modelID, providerID) pair, not modelID alone - two
     // providers could in principle expose the same modelID string, and
@@ -1319,10 +1356,10 @@ function populateModelSelect(preferredModelID, preferredProviderID) {
         if (m.modelID === preferredModelID && (!preferredProviderID || p.providerID === preferredProviderID)) preferredOpt = opt;
         group.appendChild(opt);
       }
-      modalModelEl.appendChild(group);
+      selectEl.appendChild(group);
     }
     if (preferredOpt) preferredOpt.selected = true;
-    else modalModelEl.value = defaults.apiDefault.modelID;
+    else selectEl.value = defaults.apiDefault.modelID;
   }
 }
 

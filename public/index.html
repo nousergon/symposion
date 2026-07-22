@@ -22,7 +22,7 @@
         <div class="chat-header-row">
           <span class="chat-header-title">
             <span id="chat-header-text">Select or create an agent to begin</span>
-            <button type="button" id="rename-btn" class="icon-btn" title="Rename this agent" hidden>✎</button>
+            <button type="button" id="rename-btn" class="icon-btn" title="Edit this agent (name/model)" hidden>✎</button>
           </span>
           <button type="button" id="handoff-btn" class="handoff-btn" title="Hand this session off to Remote Control - continue it from the Claude mobile app or claude.ai/code" hidden>📱 Hand off</button>
         </div>
@@ -68,6 +68,20 @@
       <div class="modal-actions">
         <button type="button" id="new-agent-cancel">Cancel</button>
         <button type="button" id="new-agent-create">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="edit-agent-modal" hidden>
+    <div class="modal">
+      <h3>Edit Agent</h3>
+      <label>Name</label>
+      <input id="edit-agent-name" type="text" autocomplete="off" />
+      <label>Model</label>
+      <select id="edit-agent-model"></select>
+      <div class="modal-actions">
+        <button type="button" id="edit-agent-cancel">Cancel</button>
+        <button type="button" id="edit-agent-save">Save</button>
       </div>
     </div>
   </div>
