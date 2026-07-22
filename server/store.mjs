@@ -54,6 +54,34 @@ export function saveSettings(settings) {
 }
 
 /**
+ * Web Push subscriptions live inside settings.json as
+ * settings.pushSubscriptions - a flat array of the browser's
+ * PushSubscription.toJSON() objects, one per (browser, device) that's
+ * granted permission. Deduped by endpoint (re-subscribing the same
+ * browser/device - e.g. after clearing site data - yields a new endpoint,
+ * so this is a real dedup key, not just an idempotency guard).
+ */
+export function addPushSubscription(subscription) {
+  const settings = loadSettings();
+  const subs = settings.pushSubscriptions ?? [];
+  if (!subs.some((s) => s.endpoint === subscription.endpoint)) {
+    subs.push(subscription);
+    saveSettings({ ...settings, pushSubscriptions: subs });
+  }
+}
+
+export function getPushSubscriptions() {
+  return loadSettings().pushSubscriptions ?? [];
+}
+
+/** Drops a subscription the push service reported as dead (404/410). */
+export function removePushSubscription(endpoint) {
+  const settings = loadSettings();
+  const subs = (settings.pushSubscriptions ?? []).filter((s) => s.endpoint !== endpoint);
+  saveSettings({ ...settings, pushSubscriptions: subs });
+}
+
+/**
  * Persists an uploaded file's bytes to disk under a fresh randomUUID() name -
  * deliberately NOT derived from the user-supplied filename, so nothing
  * client-controlled ever touches the filesystem path (the original filename
