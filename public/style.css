@@ -253,25 +253,67 @@ body {
   margin: 0 14px; padding: 14px; background: #2a1f1f;
   border: 1px solid #ff453a; border-radius: 10px;
   display: flex; flex-direction: column; gap: 8px;
+  animation: blocked-card-in 0.16s ease-out;
 }
 .blocked-card[hidden] { display: none; }
-.blocked-card-title { font-size: 13px; font-weight: 600; color: #ff453a; }
+@keyframes blocked-card-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+/* A question is the agent asking for input, not a risk gate - it gets the
+   neutral accent (matching .blocked-option.selected/.backend-btn.active)
+   rather than the permission card's alarm red, so the UI doesn't cry wolf
+   on an ordinary clarifying question. */
+.blocked-card.is-question { background: #1a2230; border-color: #0a84ff66; }
+.blocked-card-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 50%; font-size: 10px; font-weight: 700;
+  margin-right: 4px; vertical-align: -2px;
+}
+.is-permission .blocked-card-icon { color: #ff453a; }
+.blocked-card-icon-question { background: #0a84ff; color: white; }
+.blocked-card-title { font-size: 13px; font-weight: 600; color: #eaeaea; }
+.is-permission .blocked-card-title { color: #ff453a; }
 .blocked-card-detail { font-size: 13px; color: #eaeaea; }
 .blocked-card-detail code { background: #3a3a3c; padding: 1px 5px; border-radius: 4px; }
 .blocked-card-resource { font-size: 11px; color: #b0b0b5; font-family: monospace; padding-left: 8px; }
+.blocked-card-progress { font-size: 10px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: #6ea8ff; }
 .blocked-card-question-text { font-size: 13px; color: #eaeaea; margin-bottom: 4px; }
 .blocked-card-question { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; border-top: 1px solid #3a3a3c22; }
 .blocked-card-question:first-of-type { border-top: none; }
-.blocked-card-options { display: flex; flex-wrap: wrap; gap: 6px; }
+.blocked-card-options { display: flex; flex-direction: column; gap: 6px; }
 .blocked-option {
-  background: #3a3a3c; color: #eaeaea; border: 1px solid #4a4a4c;
-  border-radius: 6px; padding: 6px 10px; cursor: pointer; font-size: 12px;
+  display: flex; align-items: flex-start; gap: 8px;
+  width: 100%; text-align: left;
+  background: #232734; color: #eaeaea; border: 1px solid #3a4152;
+  border-radius: 8px; padding: 8px 10px; cursor: pointer; font-size: 12px;
+  font-family: inherit; transition: background 0.1s, border-color 0.1s;
 }
-.blocked-option.selected { background: #0a84ff; border-color: #0a84ff; color: white; }
+.blocked-option:hover { background: #2c3242; border-color: #4a5266; }
+.blocked-option.selected { background: #0a84ff22; border-color: #0a84ff; }
+.blocked-option-mark {
+  flex: 0 0 auto; width: 14px; height: 14px; margin-top: 1px;
+  border: 1.5px solid #6a7488; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+}
+.blocked-card-options.is-multi .blocked-option-mark { border-radius: 4px; }
+.blocked-option.selected .blocked-option-mark { border-color: #0a84ff; background: #0a84ff; }
+.blocked-option.selected .blocked-option-mark::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: white; }
+.blocked-card-options.is-multi .blocked-option.selected .blocked-option-mark::after { border-radius: 1px; }
+.blocked-option-body { display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-width: 0; }
+.blocked-option-label { font-size: 12px; color: #eaeaea; }
+.blocked-option-desc { font-size: 11px; color: #9a9a9e; }
+.blocked-option-key {
+  flex: 0 0 auto; font-size: 10px; color: #7a8290; border: 1px solid #3a4152;
+  border-radius: 4px; padding: 1px 5px; font-family: monospace;
+}
+.blocked-option-custom { padding: 6px 10px; }
+.blocked-option-custom .blocked-option-mark { display: none; }
 .blocked-card-custom {
-  background: #232326; border: 1px solid #3a3a3c; border-radius: 6px;
-  padding: 6px 8px; color: white; font-size: 12px; font-family: inherit;
+  flex: 1 1 auto; background: transparent; border: none; outline: none;
+  color: white; font-size: 12px; font-family: inherit;
 }
+.blocked-card-custom::placeholder { color: #7a8290; }
 .blocked-card-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 
 .background-task-card {
@@ -292,6 +334,11 @@ body {
 .blocked-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .blocked-btn.allow { background: #34c759; }
 .blocked-btn.deny { background: #ff453a; }
+/* Question footer: Submit/Skip aren't an allow/deny risk decision, so they
+   get a neutral primary/ghost treatment instead of the green/red pair. */
+.blocked-btn.primary { background: #0a84ff; }
+.blocked-btn.ghost { background: transparent; border: 1px solid #4a4a4c; color: #b0b0b5; }
+.blocked-btn.ghost:hover:not(:disabled) { background: #ffffff0d; color: #eaeaea; }
 
 .msg-cost { margin-top: 6px; font-size: 10px; color: #9a9a9e; opacity: 0.8; }
 
