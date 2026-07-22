@@ -20,6 +20,40 @@ let renderedBlockedKey = null;
 // listeners across renders/personas) and so submit/reject can silence it
 // immediately to prevent a double-fire from a keypress already in flight.
 let blockedCardKeyHandler = null;
+// Turn-finished notification (a persona's reply - including one that's
+// itself a question for Brian - was otherwise silently swallowed whenever
+// the tab wasn't the visible/focused one: no OS notification, no title
+// change, nothing. baseDocTitle is the page's real title, restored once the
+// tab is looked at again; unseenReplyCount drives the "(N) " prefix.
+const baseDocTitle = document.title;
+let unseenReplyCount = 0;
+let notifyPermissionAsked = false;
+
+function markReplyUnseen(persona, text) {
+  unseenReplyCount += 1;
+  document.title = `(${unseenReplyCount}) ${baseDocTitle}`;
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  const n = new Notification(persona ? `${persona.name} replied` : "symposion", {
+    body: (text || "").slice(0, 200),
+    tag: "symposion-turn-done", // collapses into one notification instead of stacking
+  });
+  n.onclick = () => {
+    window.focus();
+    if (persona) selectPersona(persona);
+    n.close();
+  };
+}
+
+function clearUnseenReplies() {
+  if (unseenReplyCount === 0) return;
+  unseenReplyCount = 0;
+  document.title = baseDocTitle;
+}
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) clearUnseenReplies();
+});
+window.addEventListener("focus", clearUnseenReplies);
+
 let stagedAttachments = []; // [{ file: File, localId }] - staged for the NEXT send, cleared after submit
 // Draft (composer text + staged attachments) per persona id, so switching to
 // another persona and back doesn't lose an in-progress message - previously
@@ -1049,6 +1083,14 @@ function connectStream(personaId) {
         if (costCaption) streamingBubble.appendChild(costCaption);
       }
       streamingBubble = null;
+      // This is the only "the agent is done" signal that exists for a
+      // claude-code-backend persona (no live pause/blocked state on that
+      // backend - see renderBlockedCard's doc comment), so it's the right
+      // place to catch the case where the reply itself was a question and
+      // Brian wasn't looking at the tab when it landed.
+      if (document.hidden || !document.hasFocus()) {
+        markReplyUnseen(latestPersonas.find((p) => p.id === personaId), evt.text);
+      }
       refreshPersonas();
     } else if (evt.type === "blocked" || evt.type === "unblocked") {
       clearThinkingIndicator();
@@ -1459,6 +1501,13 @@ if (SpeechRecognitionCtor) {
 chatFormEl.addEventListener("submit", async (e) => {
   e.preventDefault();
   stopDictation();
+  // Notification.requestPermission() needs a user gesture in current
+  // browsers - piggybacks on the first message send rather than firing an
+  // unprompted permission dialog on page load.
+  if (!notifyPermissionAsked && typeof Notification !== "undefined" && Notification.permission === "default") {
+    notifyPermissionAsked = true;
+    Notification.requestPermission();
+  }
   const text = chatTextEl.value.trim();
   if ((!text && stagedAttachments.length === 0) || !activePersonaId) return;
   chatTextEl.value = "";
