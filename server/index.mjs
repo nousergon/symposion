@@ -375,6 +375,74 @@ function promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpda
   });
 }
 
+/**
+ * Refreshes a persona's 1-2 sentence "what's being discussed" summary,
+ * shown at the top of its chat. Deliberately independent of the persona's
+ * OWN backend/session - it runs as a throwaway one-shot prompt against a
+ * scratch OpenCode session in DEFAULT_WORKSPACE using the cheap API_DEFAULT
+ * model (the same pool.getOrCreate(DEFAULT_WORKSPACE) pattern /api/providers
+ * already uses), so it works identically for claude-code-backed personas
+ * (which have no opencodeEntry of their own) without perturbing the
+ * persona's real conversation history or cost/token totals.
+ *
+ * Fire-and-forget from the caller's perspective: every failure path is
+ * caught and logged here, never rethrown, since a summary is a nice-to-have
+ * that must never affect the actual chat turn it runs alongside.
+ */
+async function updateSummary(persona) {
+  if (persona._summarizing) return;
+  if (persona.messages.length < 2) return; // wait for at least one full exchange
+  persona._summarizing = true;
+  let sessionId;
+  try {
+    const entry = pool.getOrCreate(DEFAULT_WORKSPACE);
+    await entry.ready;
+    const session = await entry.client.session.create({ body: { title: `summary-scratch-${persona.id}` } });
+    sessionId = session.data.id;
+
+    // Last 16 turns is plenty of context for a 1-2 sentence gist and keeps
+    // the scratch prompt small/cheap regardless of how long the real chat gets.
+    const transcript = persona.messages
+      .slice(-16)
+      .map((m) => `${m.role}: ${(m.text || "").slice(0, 800)}`)
+      .join("\n");
+
+    const result = await entry.client.session.prompt({
+      path: { id: sessionId },
+      body: {
+        model: { providerID: API_DEFAULT.providerID, modelID: API_DEFAULT.modelID },
+        system:
+          "You summarize chat transcripts. Reply with ONLY a plain 1-2 sentence summary of what is being discussed - no preamble, no quotes, no markdown.",
+        parts: [{ type: "text", text: transcript }],
+      },
+    });
+
+    const text = (result.data?.parts ?? [])
+      .filter((part) => part.type === "text")
+      .map((part) => part.text)
+      .join("")
+      .trim();
+
+    if (text) {
+      persona.summary = text;
+      persistAll();
+      hub.publish(persona.id, { type: "summary", text });
+    }
+  } catch (err) {
+    console.error(`[summary] failed for persona ${persona.id}:`, err.message);
+  } finally {
+    persona._summarizing = false;
+    if (sessionId) {
+      try {
+        await pool.getOrCreate(DEFAULT_WORKSPACE).client.session.delete({ path: { id: sessionId } });
+      } catch {
+        // Best-effort scratch-session cleanup only - a leaked throwaway
+        // session in DEFAULT_WORKSPACE costs nothing and isn't worth retrying.
+      }
+    }
+  }
+}
+
 function ttlInfo(persona) {
   const elapsed = Date.now() - persona.lastActivityTs;
   const remainingMs = Math.max(0, TTL_WINDOW_MS - elapsed);
@@ -435,6 +503,9 @@ function personaSummary(p) {
     pendingQuestion: p.pendingQuestion ?? null,
     totalCostUsd: p.totalCostUsd ?? 0,
     totalUsage: p.totalUsage ?? null,
+    // Auto-generated 1-2 sentence "what's being discussed" summary - see
+    // updateSummary(). null until the first exchange completes.
+    summary: p.summary ?? null,
     // alive is computed per-request (not stored) so a remote-control process
     // that died on its own (phone session ended, reboot) shows up as such in
     // the UI without any event plumbing from the detached process.
@@ -594,6 +665,7 @@ app.post("/api/personas", async (req, res) => {
         opencodeEntry: null,
         lastActivityTs: Date.now(),
         messages: [],
+        summary: null,
         lastDenials: [],
         pendingPermission: null,
         pendingQuestion: null,
@@ -629,6 +701,7 @@ app.post("/api/personas", async (req, res) => {
         claudeSession,
         lastActivityTs: Date.now(),
         messages: [],
+        summary: null,
         lastDenials: [],
         pendingTurn: null,
         backgroundTask: null,
@@ -852,6 +925,9 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     });
     persistAll();
     hub.publish(persona.id, { type: "done", text: replyText, denials, parts, costUsd, usage });
+    // Fire-and-forget: never await, and never let this delay the turn's own
+    // response - see updateSummary's doc comment for why it's safe to ignore.
+    updateSummary(persona);
 
     res.json({ persona: personaSummary(persona), reply: replyText, denials, parts, costUsd, usage });
   } catch (err) {

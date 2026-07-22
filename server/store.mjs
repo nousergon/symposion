@@ -105,6 +105,9 @@ export function toRecord(p) {
     // restart, and reclaim needs startedAt to know which transcript turns to
     // import back.
     handoff: p.handoff ?? null,
+    // Auto-generated 1-2 sentence "what's being discussed" summary, shown at
+    // the top of the chat - see updateSummary() in index.mjs.
+    summary: p.summary ?? null,
     messages: p.messages,
     lastDenials: p.lastDenials ?? [],
     totalCostUsd: p.totalCostUsd ?? 0,
