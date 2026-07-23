@@ -47,6 +47,253 @@ function clearUnseenReplies() {
   unseenReplyCount = 0;
   document.title = baseDocTitle;
 }
+/* ── Decision Queue Triage ── */
+
+let triageItems = [];
+let triageIndex = 0;
+let triageActive = false;
+let triageSelections = null;
+
+triageBtn.addEventListener("click", async () => {
+  if (triageActive) {
+    exitTriageMode();
+    return;
+  }
+  triageBtn.disabled = true;
+  triageBtn.textContent = "📋 Loading…";
+  try {
+    const res = await fetch("/api/decision-queue");
+    const data = await res.json();
+    if (!res.ok) { alert(`Failed to load decision queue: ${data.error}`); return; }
+    if (data.count === 0) { alert("Decision queue is empty — nothing to triage."); return; }
+    triageItems = data.items;
+    triageIndex = 0;
+    enterTriageMode();
+  } finally {
+    triageBtn.disabled = false;
+    triageBtn.textContent = "📋 Decision Queue";
+  }
+});
+
+function enterTriageMode() {
+  triageActive = true;
+  triageViewEl.hidden = false;
+  chatMessagesEl.style.display = "none";
+  chatFormEl.style.display = "none";
+  handoffCardEl.hidden = true;
+  blockedCardEl.hidden = true;
+  backgroundCardEl.hidden = true;
+  triageBtn.classList.add("active");
+  renderTriageItem();
+}
+
+function exitTriageMode() {
+  triageActive = false;
+  triageViewEl.hidden = true;
+  triageViewEl.innerHTML = "";
+  chatMessagesEl.style.display = "";
+  chatFormEl.style.display = "";
+  triageBtn.classList.remove("active");
+  triageSummaryEl.hidden = true;
+  triageSelections = null;
+}
+
+function renderTriageItem() {
+  if (triageIndex >= triageItems.length) {
+    triageViewEl.innerHTML = `
+      <div class="triage-empty">
+        <div class="triage-empty-icon">✓</div>
+        <div class="triage-empty-text">All done — ${triageItems.length} item${triageItems.length === 1 ? "" : "s"} triaged.</div>
+        <button type="button" class="triage-close-btn" id="triage-done-close">Close</button>
+      </div>
+    `;
+    triageViewEl.querySelector("#triage-done-close")?.addEventListener("click", exitTriageMode);
+    triageSummaryEl.hidden = true;
+    return;
+  }
+
+  const item = triageItems[triageIndex];
+  const ask = extractAsk(item.body);
+  const recommendation = extractRecommendation(item.body);
+  const closesWhen = findClosesWhen(item.body);
+  const optionText = item.isPr ? `PR ${item.repo}#${item.number}` : `Issue ${item.repo}#${item.number}`;
+
+  triageSummaryEl.hidden = false;
+  triageSummaryEl.textContent = `${triageIndex + 1} of ${triageItems.length} · ${item.repo}#${item.number}`;
+
+  triageSelections = null;
+
+  const labelBadges = [];
+  if (item.priority) labelBadges.push(`<span class="triage-badge priority">P${item.priority}</span>`);
+  if (item.complexity) labelBadges.push(`<span class="triage-badge complexity">${item.complexity}</span>`);
+  if (item.gate) labelBadges.push(`<span class="triage-badge gate">${item.gate}</span>`);
+  if (item.isPr) labelBadges.push('<span class="triage-badge pr">PR</span>');
+
+  triageViewEl.innerHTML = `
+    <div class="triage-card">
+      <div class="triage-card-header">
+        <span class="triage-card-number">${item.repo}#${item.number}</span>
+        <span class="triage-card-badges">${labelBadges.join("")}</span>
+      </div>
+      <div class="triage-card-title">${escapeHtml(item.title)}</div>
+      <div class="triage-card-body">
+        ${ask ? `<div class="triage-ask"><span class="triage-label">Ask:</span> ${escapeHtml(ask)}</div>` : ""}
+        ${recommendation ? `<div class="triage-sota"><span class="triage-label">SOTA / Recommendation:</span> ${escapeHtml(recommendation)}</div>` : ""}
+        ${closesWhen ? `<div class="triage-closes"><span class="triage-label">Closes when:</span> ${escapeHtml(closesWhen)}</div>` : ""}
+        <div class="triage-meta">
+          <span class="triage-meta-author">${escapeHtml(item.author)}</span>
+          <span class="triage-meta-date">${new Date(item.createdAt).toLocaleDateString()}</span>
+          <a href="${escapeHtml(item.url)}" target="_blank" rel="noopener" class="triage-meta-link">Open on GitHub →</a>
+        </div>
+      </div>
+      <div class="triage-rulings">
+        ${RULING_OPTIONS.map((opt, i) => `
+          <button type="button" class="triage-ruling-btn" data-value="${opt.value}" data-index="${i}">
+            <span class="triage-ruling-key">${i + 1}</span>
+            <span class="triage-ruling-body">
+              <span class="triage-ruling-label">${escapeHtml(opt.label)}</span>
+              <span class="triage-ruling-desc">${escapeHtml(opt.description)}</span>
+            </span>
+          </button>
+        `).join("")}
+        ${item.gate === "operator" || (ask && /\bmilestone\b/i.test(ask)) ? `
+          <button type="button" class="triage-ruling-btn milestone" data-value="milestone" data-index="${RULING_OPTIONS.length}">
+            <span class="triage-ruling-key">${RULING_OPTIONS.length + 1}</span>
+            <span class="triage-ruling-body">
+              <span class="triage-ruling-label">Convert to milestone</span>
+              <span class="triage-ruling-desc">Blocked on an event, not a date</span>
+            </span>
+          </button>
+        ` : ""}
+      </div>
+      <div class="triage-comment-area" hidden>
+        <textarea class="triage-comment-input" placeholder="Optional comment for the ruling…" rows="2"></textarea>
+      </div>
+      <div class="triage-card-actions">
+        <span class="triage-progress">${triageIndex + 1} / ${triageItems.length}</span>
+        <div>
+          <button type="button" class="triage-action-btn skip" id="triage-skip">Skip</button>
+          <button type="button" class="triage-action-btn submit" id="triage-submit" disabled>Submit ruling</button>
+        </div>
+      </div>
+    </div>
+  `;
+
+  // Wire ruling buttons
+  triageViewEl.querySelectorAll(".triage-ruling-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      triageViewEl.querySelectorAll(".triage-ruling-btn").forEach((b) => b.classList.remove("selected"));
+      btn.classList.add("selected");
+      triageSelections = btn.dataset.value;
+
+      // Show comment area for some rulings
+      const commentArea = triageViewEl.querySelector(".triage-comment-area");
+      const needsComment = ["changes", "defer"].includes(triageSelections);
+      commentArea.hidden = !needsComment;
+
+      triageViewEl.querySelector("#triage-submit").disabled = false;
+    });
+  });
+
+  // Submit
+  triageViewEl.querySelector("#triage-submit").addEventListener("click", async () => {
+    if (!triageSelections) return;
+    const comment = triageViewEl.querySelector(".triage-comment-input")?.value?.trim() || null;
+    triageViewEl.querySelectorAll("button").forEach((b) => (b.disabled = true));
+
+    try {
+      const res = await fetch("/api/decision-queue/ruling", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          repo: item.repo,
+          number: item.number,
+          isPr: item.isPr,
+          ruling: triageSelections,
+          comment,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) { alert(`Ruling failed: ${data.error}`); return; }
+      triageIndex++;
+      renderTriageItem();
+    } catch (err) {
+      alert(`Ruling failed: ${err.message}`);
+    }
+  });
+
+  // Skip
+  triageViewEl.querySelector("#triage-skip").addEventListener("click", () => {
+    triageItems.push(triageItems.splice(triageIndex, 1)[0]); // move to end
+    renderTriageItem();
+  });
+
+  // Keyboard shortcuts
+  const totalOptions = triageViewEl.querySelectorAll(".triage-ruling-btn").length;
+  const keyHandler = (e) => {
+    if (e.key === "Enter" && triageSelections) {
+      e.preventDefault();
+      triageViewEl.querySelector("#triage-submit")?.click();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      triageViewEl.querySelector("#triage-skip")?.click();
+    } else if (/^[1-9]$/.test(e.key)) {
+      const idx = Number(e.key) - 1;
+      if (idx < totalOptions) {
+        e.preventDefault();
+        triageViewEl.querySelector(`.triage-ruling-btn[data-index="${idx}"]`)?.click();
+      }
+    }
+  };
+  document.addEventListener("keydown", keyHandler);
+  triageViewEl._triageKeyHandler = keyHandler;
+}
+
+// Remove keyboard handler when leaving triage
+const _origExitTriage = exitTriageMode;
+exitTriageMode = function() {
+  if (triageViewEl._triageKeyHandler) {
+    document.removeEventListener("keydown", triageViewEl._triageKeyHandler);
+    triageViewEl._triageKeyHandler = null;
+  }
+  _origExitTriage();
+};
+
+// Extract helpers (mirrors server-side logic for client-side rendering)
+function extractAsk(body) {
+  const m = body.match(/\*\*Ask:\*\*\s*([\s\S]*?)(?:\n\n|\n#{1,3}|$)/i);
+  if (m) return m[1].trim();
+  const askLine = body.split("\n").find((l) => l.match(/^##\s*Ask/i));
+  if (askLine) {
+    const idx = body.indexOf(askLine);
+    const after = body.slice(idx + askLine.length).trim();
+    const nextH = after.search(/\n#{1,3}\s/);
+    return (nextH > 0 ? after.slice(0, nextH) : after.slice(0, 500)).trim();
+  }
+  return body.slice(0, 300).trim();
+}
+function extractRecommendation(body) {
+  const s = body.match(/##\s*SOTA\b|##\s*Recommendation|##\s*Approach/i);
+  if (!s) return null;
+  const after = body.slice(s.index + s[0].length).trim();
+  const nextH = after.search(/\n#{1,3}\s/);
+  return (nextH > 0 ? after.slice(0, nextH) : after.slice(0, 400)).trim();
+}
+function findClosesWhen(body) {
+  const m = body.match(/\*\*Closes when\*\*|##\s*Closes when/i);
+  if (!m) return null;
+  const after = body.slice(m.index + m[0].length).trim();
+  const nextH = after.search(/\n#{1,3}\s/);
+  return (nextH > 0 ? after.slice(0, nextH) : after.slice(0, 300)).trim();
+}
+
+const RULING_OPTIONS = [
+  { label: "Approve", value: "approve", description: "Accept as-is, next tier executes" },
+  { label: "Changes requested", value: "changes", description: "Needs revision before proceeding" },
+  { label: "Defer", value: "defer", description: "Postpone — set a Re-exam date or milestone" },
+  { label: "Won't fix / Close", value: "wontfix", description: "Close as not planned" },
+];
+
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) clearUnseenReplies();
 });
@@ -132,6 +379,10 @@ let stagedAttachments = []; // [{ file: File, localId }] - staged for the NEXT s
 // draft typed for persona A would silently reappear addressed to whichever
 // persona B you'd switched to (and send to the wrong one if submitted there).
 const personaDrafts = new Map(); // id -> { text: string, attachments: [{file, localId}] }
+
+const triageBtn = document.getElementById("triage-btn");
+const triageViewEl = document.getElementById("triage-view");
+const triageSummaryEl = document.getElementById("triage-summary");
 
 const personaListEl = document.getElementById("persona-list");
 const chatHeaderTextEl = document.getElementById("chat-header-text");

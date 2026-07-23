@@ -16,6 +16,7 @@ import { randomStarName } from "./star-names.mjs";
 import { SseHub } from "./sse-hub.mjs";
 import { resolveSecret } from "./secrets.mjs";
 import { ensureEgressProxy } from "./llm-egress-proxy.mjs";
+import { fetchQueue, itemToQuestion, postComment, removeLabels, addLabels, closeIssue, markPrReadyForReview } from "./decision-queue.mjs";
 
 const hub = new SseHub();
 
@@ -1268,6 +1269,62 @@ app.post("/api/personas/:id/question-reply", async (req, res) => {
     res.status(204).end();
   } catch (err) {
     console.error(err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+/**
+ * Fetches all items currently in the decision queue (triage:session, gate:* issues
+ * and PRs) and returns them as a list of question-shaped blocks the client can
+ * feed into its existing blocked-card / question rendering, one at a time.
+ */
+app.get("/api/decision-queue", async (req, res) => {
+  try {
+    const items = await fetchQueue();
+    const questions = items.map(itemToQuestion).flat();
+    res.json({ count: items.length, items, questions });
+  } catch (err) {
+    console.error("[decision-queue]", err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+/**
+ * Posts a ruling on a triage item: writes an operator-decision comment, strips
+ * gate:* and triage:session labels, and (for wontfix) closes the issue.
+ * Body: { repo, number, isPr, ruling, comment? }
+ * ruling: "approve" | "changes" | "defer" | "wontfix" | "milestone"
+ */
+app.post("/api/decision-queue/ruling", async (req, res) => {
+  try {
+    const { repo, number, isPr, ruling, comment } = req.body ?? {};
+    if (!repo || !number || !ruling) {
+      return res.status(400).json({ error: "repo, number, and ruling are required" });
+    }
+
+    const date = new Date().toISOString().slice(0, 10);
+    let body = `**Operator decision ${date}: ${ruling}**`;
+
+    if (comment) body += `\n\n${comment}`;
+    await postComment(repo, number, body);
+
+    // Strip triage + gate labels
+    const stripLabels = ["triage:session", "gate:operator", "gate:decision", "gate:device", "gate:date", "gate:dependency", "gate:milestone"];
+    await removeLabels(repo, number, stripLabels);
+
+    if (ruling === "wontfix") {
+      await closeIssue(repo, number);
+    } else if (ruling === "approve" && isPr) {
+      // If this is a PR and it's still a draft, mark it ready for review
+      await markPrReadyForReview(repo, number);
+    }
+
+    // Add ruling label for traceability
+    await addLabels(repo, number, [`ruling:${ruling}`]);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("[decision-queue/ruling]", err);
     res.status(500).json({ error: String(err) });
   }
 });
