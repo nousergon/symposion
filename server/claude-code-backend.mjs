@@ -98,6 +98,16 @@ function toContentBlock(a) {
   return { type: "document", source: { type: "base64", media_type: a.mime, data: a.base64 }, title: a.filename };
 }
 
+// A claude-code turn that runs longer than this is almost certainly hung
+// (deadlocked tool loop, crashed child process never exiting, subagent
+// dispatch stuck). Without this guard, a hung claude -p process leaves the
+// persona in working:true state forever with no error surfaced — the core
+// root cause of symposion's "agent became unresponsive" reports.
+// 10 minutes covers a genuine long turn (multiple subagent dispatches at
+// the 5-minute agent timeout + buffer) while still surfacing a true hang
+// before the user gives up and refreshes.
+const TURN_TIMEOUT_MS = 10 * 60 * 1000;
+
 export class ClaudeCodeSession {
   /**
    * @param {boolean} resume - true when reconnecting to a persona that
@@ -195,7 +205,7 @@ export class ClaudeCodeSession {
       this.alive = false;
       this.crashError = `claude process failed to start: ${err.message}`;
       console.error(`[claude:${sessionId}] spawn error:`, err);
-      for (const { reject } of this.queue) reject(new Error(this.crashError));
+      for (const { reject, timeout } of this.queue) { clearTimeout(timeout); reject(new Error(this.crashError)); }
       this.queue = [];
     });
 
@@ -205,7 +215,7 @@ export class ClaudeCodeSession {
       this.alive = false;
       if (this.queue.length > 0) {
         this.crashError = `claude process exited (code=${code}, signal=${signal}) while a message was in flight`;
-        for (const { reject } of this.queue) reject(new Error(this.crashError));
+        for (const { reject, timeout } of this.queue) { clearTimeout(timeout); reject(new Error(this.crashError)); }
         this.queue = [];
       }
     });
@@ -275,6 +285,7 @@ export class ClaudeCodeSession {
       this.blockTypes.clear();
       const pending = this.queue.shift();
       if (pending) {
+        clearTimeout(pending.timeout);
         pending.resolve({
           replyText: evt.result ?? "",
           permissionDenials: evt.permission_denials ?? [],
@@ -335,7 +346,26 @@ export class ClaudeCodeSession {
       return Promise.reject(new Error(this.crashError || "claude process is not running"));
     }
     return new Promise((resolve, reject) => {
-      this.queue.push({ resolve, reject, onDelta, onToolUpdate });
+      const entry = { resolve, reject, onDelta, onToolUpdate, timeout: null };
+
+      // Per-turn timeout guard — if the claude process hangs (deadlocked
+      // tool loop, stuck subagent dispatch, crashed child never exiting),
+      // this surfaced the failure instead of leaving the persona in
+      // working:true state forever. On timeout the process is killed so the
+      // next reconnect starts fresh rather than resuming a poisoned session.
+      entry.timeout = setTimeout(() => {
+        const idx = this.queue.indexOf(entry);
+        if (idx >= 0) this.queue.splice(idx, 1);
+        if (idx === 0) {
+          // The in-flight turn is what timed out — the process is hung.
+          this.alive = false;
+          this.crashError = `claude process timed out after ${TURN_TIMEOUT_MS / 60000} minutes — process killed`;
+          this.proc.kill();
+        }
+        reject(new Error(this.crashError || "turn timed out"));
+      }, TURN_TIMEOUT_MS);
+
+      this.queue.push(entry);
       // No attachments: keep the plain-string content shape exactly as
       // before (zero wire-format change for the common case). With
       // attachments, switch to an Anthropic content-block array - the same

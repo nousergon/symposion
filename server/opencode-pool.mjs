@@ -83,6 +83,26 @@ export class OpenCodeServerPool {
     /** @type {Map<string, {port:number, client:object, proc:import('child_process').ChildProcess|null, ready:Promise<void>, events:EventEmitter}>} */
     this.byDirectory = new Map();
     this.registry = initialRegistry;
+
+    // Prune stale registry entries at startup — a recorded process that
+    // died while the server was down, or a directory that was cleaned up
+    // (worktree removed), would otherwise linger as a dead reference that
+    // every _connect() call for that directory has to discover and discard.
+    // Without this, stale entries also leak ports: nextPort seeds past
+    // every port ever recorded, so a dead entry on port 4200 permanently
+    // skips that port even though the process it referenced is long gone.
+    // isProcessAlive is a kill(pid, 0) probe — cheap, no syscall overhead.
+    let pruned = 0;
+    for (const [dir, rec] of Object.entries(this.registry)) {
+      if (!isProcessAlive(rec.pid) || !fs.existsSync(dir)) {
+        delete this.registry[dir];
+        pruned++;
+      }
+    }
+    if (pruned > 0) {
+      console.log(`[pool] pruned ${pruned} stale registry entr${pruned === 1 ? "y" : "ies"} at startup`);
+      saveRegistry(this.registry);
+    }
   }
 
   getOrCreate(directory) {

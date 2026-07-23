@@ -244,6 +244,18 @@ body {
 .blocked-flag { color: #ff453a; font-size: 12px; margin-right: 4px; }
 .msg.assistant.blocked { border: 1px solid #ff453a; }
 
+.msg.assistant.error {
+  background: #3a1a1a; color: #ff9b96; border: 1px solid #ff453a88;
+}
+/* Reconnection indicator during an SSE drop — transient visual pulse to
+   show the chat isn't frozen while EventSource reconnects behind the scenes. */
+.msg.assistant.reconnecting::after {
+  content: " · reconnecting…";
+  color: #ff9b96;
+  font-size: 11px;
+  animation: thinking-bounce 1.2s infinite ease-in-out;
+}
+
 .msg.assistant.thinking { display: flex; gap: 4px; align-items: center; padding: 14px; }
 .msg.assistant.thinking span {
   width: 7px; height: 7px; border-radius: 50%; background: #9a9a9e;
