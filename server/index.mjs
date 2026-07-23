@@ -34,10 +34,13 @@ const DEV_ROOT = path.join(os.homedir(), "Development");
 // each provider's baseURL at the matching port with a placeholder apiKey -
 // see llm-egress-proxy.mjs's module doc). deepseek=8972 predates this map
 // (symposion#6); xai=8973 added 2026-07-19 when a real xAI account was
-// wired up the same way, generalizing what used to be a DeepSeek-only path.
+// wired up the same way, generalizing what used to be a DeepSeek-only path;
+// gemini=8974 added 2026-07-23 for Gemini models via Google's OpenAI-
+// compatible endpoint (generativelanguage.googleapis.com/v1beta/openai).
 const EGRESS_PROXY_PROVIDERS = {
   deepseek: { port: 8972, upstreamHost: "api.deepseek.com", apiKeyEnv: "DEEPSEEK_API_KEY", upstreamPrefix: "" },
   xai: { port: 8973, upstreamHost: "api.x.ai", apiKeyEnv: "XAI_API_KEY", upstreamPrefix: "" },
+  gemini: { port: 8974, upstreamHost: "generativelanguage.googleapis.com", apiKeyEnv: "GEMINI_API_KEY", upstreamPrefix: "/v1beta/openai" },
 };
 
 // Resolved once at startup (env override, else SSM /symposion/{KEY}) and
