@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test server/*.test.mjs"
+    "test": "node --test server/*.test.mjs",
+    "sync-vendor": "cp node_modules/marked/lib/marked.umd.js public/vendor/marked.js && cp node_modules/dompurify/dist/purify.min.js public/vendor/purify.min.js"
   },
   "keywords": [],
   "author": "",
@@ -16,7 +17,9 @@
   "dependencies": {
     "@aws-sdk/client-ssm": "^3.1092.0",
     "@opencode-ai/sdk": "^1.18.4",
+    "dompurify": "^3.4.12",
     "express": "^5.2.1",
+    "marked": "^18.0.7",
     "opencode-ai": "^1.18.4",
     "qrcode": "^1.5.4",
     "web-push": "^3.6.7"
