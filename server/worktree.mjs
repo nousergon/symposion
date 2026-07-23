@@ -54,11 +54,11 @@ export function removeWorktreeAndBranch(repoDir, worktreePath, branch) {
   try {
     execFileSync("git", ["worktree", "remove", worktreePath, "--force"], { cwd: repoDir });
   } catch (err) {
-    console.error(`[worktree] failed to remove worktree ${worktreePath}:`, err.message);
+    console.error(`[worktree] failed to remove worktree ${worktreePath}: ${err.message}`);
   }
   try {
     execFileSync("git", ["branch", "-D", branch], { cwd: repoDir });
   } catch (err) {
-    console.error(`[worktree] failed to delete branch ${branch}:`, err.message);
+    console.error(`[worktree] failed to delete branch ${branch}: ${err.message}`);
   }
 }
