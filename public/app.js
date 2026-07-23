@@ -1465,6 +1465,24 @@ function connectStream(personaId) {
   streamingBubble = null;
   clearThinkingIndicator();
   activeStream = new EventSource(`/api/personas/${personaId}/stream`);
+
+  // EventSource auto-reconnects by default after a connection drop, but
+  // without an onerror handler there's no visibility into the gap — the
+  // chat silently pauses then jumps as buffered events arrive all at once.
+  // Showing a transient indicator during reconnection makes the gap legible.
+  activeStream.onerror = () => {
+    // readyState 0 (CONNECTING) = reconnecting after a drop. 2 (CLOSED) =
+    // gave up entirely (network down, server dead). In either case, if a
+    // turn was mid-stream, mark the bubble so the UI doesn't look frozen.
+    if (streamingBubble && activeStream.readyState === EventSource.CONNECTING) {
+      streamingBubble.classList.add("reconnecting");
+    }
+    // On successful reconnect, EventSource fires onopen — clear the indicator.
+  };
+  activeStream.onopen = () => {
+    if (streamingBubble) streamingBubble.classList.remove("reconnecting");
+  };
+
   activeStream.onmessage = (e) => {
     const evt = JSON.parse(e.data);
     if (evt.type === "delta") {
@@ -2036,11 +2054,26 @@ chatFormEl.addEventListener("submit", async (e) => {
 
   // The assistant reply is rendered live via the SSE stream (connectStream) -
   // this POST just kicks the turn off and waits for it to fully resolve.
-  await fetch(`/api/personas/${activePersonaId}/messages`, {
+  const res = await fetch(`/api/personas/${activePersonaId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text, attachments }),
   });
+  // A non-ok response (process crash, timeout, proxy failure) would
+  // otherwise leave the thinking indicator visible forever — the user sees
+  // a hung state with zero feedback. Surface the error in the chat and
+  // re-sync persona state so the sidebar's working:true clears too.
+  if (!res.ok) {
+    clearThinkingIndicator();
+    streamingBubble = null;
+    const data = await res.json().catch(() => ({}));
+    const errDiv = document.createElement("div");
+    errDiv.className = "msg assistant error";
+    errDiv.textContent = `❌ ${data.error || res.statusText || "Turn failed — the agent's backend may have crashed."}`;
+    chatMessagesEl.appendChild(errDiv);
+    chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+    await refreshPersonas();
+  }
 });
 
 if ("serviceWorker" in navigator) {
