@@ -117,7 +117,35 @@ function extractAsk(body) {
 }
 
 function extractRecommendation(body) {
-  const s = body.match(/##\s*SOTA\b|##\s*Recommendation|##\s*Approach/i);
+  // Try **Recommendation:** bold format
+  const m = body.match(/\*\*Recommendation:\*\*\s*([\s\S]*?)(?:\n\n|\n#{1,3}|$)/i);
+  if (m) return m[1].trim();
+  // Try ## Recommendation or ## Approach heading format
+  const s = body.match(/##\s*Recommendation\b|##\s*Approach\b/i);
+  if (!s) return null;
+  const after = body.slice(s.index + s[0].length).trim();
+  const nextH = after.search(/\n#{1,3}\s/);
+  return (nextH > 0 ? after.slice(0, nextH) : after.slice(0, 400)).trim();
+}
+
+function extractSota(body) {
+  // Try **SOTA:** bold format
+  const m = body.match(/\*\*SOTA:\*\*\s*([\s\S]*?)(?:\n\n|\n#{1,3}|$)/i);
+  if (m) return m[1].trim();
+  // Try ## SOTA heading format
+  const s = body.match(/##\s*SOTA\b/i);
+  if (!s) return null;
+  const after = body.slice(s.index + s[0].length).trim();
+  const nextH = after.search(/\n#{1,3}\s/);
+  return (nextH > 0 ? after.slice(0, nextH) : after.slice(0, 400)).trim();
+}
+
+function extractDelta(body) {
+  // Try **Delta:** bold format
+  const m = body.match(/\*\*Delta:\*\*\s*([\s\S]*?)(?:\n\n|\n#{1,3}|$)/i);
+  if (m) return m[1].trim();
+  // Try ## Delta heading format
+  const s = body.match(/##\s*Delta\b/i);
   if (!s) return null;
   const after = body.slice(s.index + s[0].length).trim();
   const nextH = after.search(/\n#{1,3}\s/);
@@ -210,6 +238,8 @@ const MILESTONE_OPTION = { label: "Convert to milestone", value: "milestone", de
 export function itemToQuestion(item) {
   const ask = extractAsk(item.body);
   const recommendation = extractRecommendation(item.body);
+  const sota = extractSota(item.body);
+  const delta = extractDelta(item.body);
   const closesWhen = findClosesWhen(item.body);
 
   const optionText = item.isPr
@@ -218,7 +248,9 @@ export function itemToQuestion(item) {
 
   const descParts = [
     ask ? `**Ask:** ${ask}` : null,
-    recommendation ? `**SOTA/Recommendation:** ${recommendation}` : null,
+    recommendation ? `**Recommendation:** ${recommendation}` : null,
+    sota ? `**SOTA approach:** ${sota}` : null,
+    delta ? `**Delta:** ${delta}` : null,
     closesWhen ? `**Closes when:** ${closesWhen}` : null,
   ].filter(Boolean);
 
