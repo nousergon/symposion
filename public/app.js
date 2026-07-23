@@ -53,6 +53,7 @@ let triageItems = [];
 let triageIndex = 0;
 let triageActive = false;
 let triageSelections = null;
+const triageBtn = document.getElementById("triage-btn");
 
 triageBtn.addEventListener("click", async () => {
   if (triageActive) {
@@ -380,7 +381,6 @@ let stagedAttachments = []; // [{ file: File, localId }] - staged for the NEXT s
 // persona B you'd switched to (and send to the wrong one if submitted there).
 const personaDrafts = new Map(); // id -> { text: string, attachments: [{file, localId}] }
 
-const triageBtn = document.getElementById("triage-btn");
 const triageViewEl = document.getElementById("triage-view");
 const triageSummaryEl = document.getElementById("triage-summary");
 
