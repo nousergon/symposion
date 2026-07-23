@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 
 const BACKLOG_REPOS = ["alpha-engine-config", "metron-ops", "vires-ops", "telos-ops"];
 const CODE_REPOS = [
@@ -8,35 +8,72 @@ const CODE_REPOS = [
   "nousergon-docs", "metron", "vires", "vires-ops", "telos", "telos-ops",
 ];
 
-function ghApi(path, method = "GET", body = null) {
-  const token = execSync("gh auth token", { encoding: "utf8" }).trim();
-  const args = ["-s", "-f", `Authorization=Bearer ${token}`];
-  if (body) args.push("-d", JSON.stringify(body));
-  const cmd = `curl ${args.join(" ")} "https://api.github.com${path}"`;
-  return JSON.parse(execSync(cmd, { encoding: "utf8", maxBuffer: 2 * 1024 * 1024 }));
+// Every repo/number pair this module operates on must resolve against this
+// allowlist before being used to build a GitHub API path — CodeQL flagged the
+// prior curl/execSync string-built commands as command injection + SSRF since
+// repo/number arrive from the /api/decision-queue/ruling request body.
+const ALL_REPOS = new Set([...BACKLOG_REPOS, ...CODE_REPOS]);
+
+function assertValidRepo(repo) {
+  if (!ALL_REPOS.has(repo)) throw new Error(`Unknown repo: ${repo}`);
+  return repo;
 }
 
-function ghGraphql(query, variables = {}) {
-  const token = execSync("gh auth token", { encoding: "utf8" }).trim();
-  const body = JSON.stringify({ query, variables });
-  const res = execSync(
-    `curl -s -f -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d ${JSON.stringify(encodeURIComponent(body))} "https://api.github.com/graphql"`,
-    { encoding: "utf8", maxBuffer: 2 * 1024 * 1024 }
-  );
-  return JSON.parse(res);
+function assertValidIssueNumber(number) {
+  const n = Number(number);
+  if (!Number.isInteger(n) || n <= 0) throw new Error(`Invalid issue/PR number: ${number}`);
+  return n;
 }
 
-function listIssues(repo, labels) {
+let cachedToken = null;
+function ghToken() {
+  if (!cachedToken) {
+    cachedToken = execFileSync("gh", ["auth", "token"], { encoding: "utf8" }).trim();
+  }
+  return cachedToken;
+}
+
+async function ghApi(path, method = "GET", body = null) {
+  const res = await fetch(`https://api.github.com${path}`, {
+    method,
+    headers: {
+      Authorization: `Bearer ${ghToken()}`,
+      Accept: "application/vnd.github+json",
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) throw new Error(`GitHub API ${method} ${path} failed: ${res.status} ${await res.text()}`);
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+async function ghGraphql(query, variables = {}) {
+  const res = await fetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${ghToken()}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+  if (!res.ok) throw new Error(`GitHub GraphQL failed: ${res.status} ${await res.text()}`);
+  return res.json();
+}
+
+async function listIssues(repo, labels) {
+  assertValidRepo(repo);
   const labelQ = encodeURIComponent(labels.join(","));
-  const url = `/repos/nousergon/${repo}/issues?state=open&labels=${labelQ}&per_page=100`;
-  const items = ghApi(url);
+  const url = `/repos/nousergon/${encodeURIComponent(repo)}/issues?state=open&labels=${labelQ}&per_page=100`;
+  const items = await ghApi(url);
   return items.filter((i) => !i.pull_request).map((i) => enrichItem(i, repo));
 }
 
-function listPrs(repo, labels) {
+async function listPrs(repo, labels) {
+  assertValidRepo(repo);
   const labelQ = encodeURIComponent(labels.join(","));
-  const url = `/repos/nousergon/${repo}/issues?state=open&labels=${labelQ}&per_page=100`;
-  const items = ghApi(url);
+  const url = `/repos/nousergon/${encodeURIComponent(repo)}/issues?state=open&labels=${labelQ}&per_page=100`;
+  const items = await ghApi(url);
   return items.filter((i) => i.pull_request).map((i) => enrichItem(i, repo, true));
 }
 
@@ -95,38 +132,43 @@ function findClosesWhen(body) {
   return (nextH > 0 ? after.slice(0, nextH) : after.slice(0, 300)).trim();
 }
 
-export function postComment(repo, number, text) {
-  ghApi(`/repos/nousergon/${repo}/issues/${number}/comments`, "POST", { body: text });
+export async function postComment(repo, number, text) {
+  assertValidRepo(repo);
+  const n = assertValidIssueNumber(number);
+  await ghApi(`/repos/nousergon/${encodeURIComponent(repo)}/issues/${n}/comments`, "POST", { body: text });
 }
 
-export function removeLabels(repo, number, labelNames) {
+export async function removeLabels(repo, number, labelNames) {
+  assertValidRepo(repo);
+  const n = assertValidIssueNumber(number);
   for (const name of labelNames) {
     try {
-      ghApi(`/repos/nousergon/${repo}/issues/${number}/labels/${encodeURIComponent(name)}`, "DELETE");
+      await ghApi(`/repos/nousergon/${encodeURIComponent(repo)}/issues/${n}/labels/${encodeURIComponent(name)}`, "DELETE");
     } catch {}
   }
 }
 
-export function addLabels(repo, number, labelNames) {
-  ghApi(`/repos/nousergon/${repo}/issues/${number}/labels`, "POST", { labels: labelNames });
+export async function addLabels(repo, number, labelNames) {
+  assertValidRepo(repo);
+  const n = assertValidIssueNumber(number);
+  await ghApi(`/repos/nousergon/${encodeURIComponent(repo)}/issues/${n}/labels`, "POST", { labels: labelNames });
 }
 
-export function closeIssue(repo, number) {
-  ghApi(`/repos/nousergon/${repo}/issues/${number}`, "PATCH", { state: "closed", state_reason: "not_planned" });
+export async function closeIssue(repo, number) {
+  assertValidRepo(repo);
+  const n = assertValidIssueNumber(number);
+  await ghApi(`/repos/nousergon/${encodeURIComponent(repo)}/issues/${n}`, "PATCH", { state: "closed", state_reason: "not_planned" });
 }
 
-export function markPrReadyForReview(repo, number) {
+export async function markPrReadyForReview(repo, number) {
+  assertValidRepo(repo);
+  const n = assertValidIssueNumber(number);
   try {
-    const token = execSync("gh auth token", { encoding: "utf8" }).trim();
-    // Fetch the PR's node_id (GraphQL global ID) first
-    const prInfo = JSON.parse(execSync(
-      `curl -s -H "Authorization: Bearer ${token}" "https://api.github.com/repos/nousergon/${repo}/pulls/${number}"`,
-      { encoding: "utf8" }
-    ));
+    const prInfo = await ghApi(`/repos/nousergon/${encodeURIComponent(repo)}/pulls/${n}`);
     const nodeId = prInfo.node_id;
     if (!nodeId) return;
-    const gql = `mutation { markPullRequestReadyForReview(input: { pullRequestId: "${nodeId}" }) { clientMutationId } }`;
-    execSync(`curl -s -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '${JSON.stringify({ query: gql })}' "https://api.github.com/graphql"`, { encoding: "utf8", maxBuffer: 1024 * 1024 });
+    const gql = `mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { clientMutationId } }`;
+    await ghGraphql(gql, { id: nodeId });
   } catch {}
 }
 
@@ -135,17 +177,17 @@ export function markPrReadyForReview(repo, number) {
  * across backlog repos, plus PRs with triage:session across all code repos.
  * Returns one combined list, oldest-first.
  */
-export function fetchQueue() {
+export async function fetchQueue() {
   const all = [];
 
   const triageLabels = ["triage:session", "gate:operator", "gate:decision", "gate:device"];
   for (const repo of BACKLOG_REPOS) {
-    try { all.push(...listIssues(repo, triageLabels)); } catch {}
+    try { all.push(...(await listIssues(repo, triageLabels))); } catch {}
   }
 
   for (const repo of CODE_REPOS) {
-    try { all.push(...listIssues(repo, ["triage:session"])); } catch {}
-    try { all.push(...listPrs(repo, ["triage:session"])); } catch {}
+    try { all.push(...(await listIssues(repo, ["triage:session"]))); } catch {}
+    try { all.push(...(await listPrs(repo, ["triage:session"]))); } catch {}
   }
 
   all.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));

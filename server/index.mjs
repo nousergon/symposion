@@ -1278,9 +1278,9 @@ app.post("/api/personas/:id/question-reply", async (req, res) => {
  * and PRs) and returns them as a list of question-shaped blocks the client can
  * feed into its existing blocked-card / question rendering, one at a time.
  */
-app.get("/api/decision-queue", (req, res) => {
+app.get("/api/decision-queue", async (req, res) => {
   try {
-    const items = fetchQueue();
+    const items = await fetchQueue();
     const questions = items.map(itemToQuestion).flat();
     res.json({ count: items.length, items, questions });
   } catch (err) {
@@ -1295,33 +1295,32 @@ app.get("/api/decision-queue", (req, res) => {
  * Body: { repo, number, isPr, ruling, comment? }
  * ruling: "approve" | "changes" | "defer" | "wontfix" | "milestone"
  */
-app.post("/api/decision-queue/ruling", (req, res) => {
+app.post("/api/decision-queue/ruling", async (req, res) => {
   try {
     const { repo, number, isPr, ruling, comment } = req.body ?? {};
     if (!repo || !number || !ruling) {
       return res.status(400).json({ error: "repo, number, and ruling are required" });
     }
 
-    const label = isPr ? "PR" : "Issue";
     const date = new Date().toISOString().slice(0, 10);
     let body = `**Operator decision ${date}: ${ruling}**`;
 
     if (comment) body += `\n\n${comment}`;
-    postComment(repo, number, body);
+    await postComment(repo, number, body);
 
     // Strip triage + gate labels
     const stripLabels = ["triage:session", "gate:operator", "gate:decision", "gate:device", "gate:date", "gate:dependency", "gate:milestone"];
-    removeLabels(repo, number, stripLabels);
+    await removeLabels(repo, number, stripLabels);
 
     if (ruling === "wontfix") {
-      closeIssue(repo, number);
+      await closeIssue(repo, number);
     } else if (ruling === "approve" && isPr) {
       // If this is a PR and it's still a draft, mark it ready for review
-      markPrReadyForReview(repo, number);
+      await markPrReadyForReview(repo, number);
     }
 
     // Add ruling label for traceability
-    addLabels(repo, number, [`ruling:${ruling}`]);
+    await addLabels(repo, number, [`ruling:${ruling}`]);
 
     res.json({ ok: true });
   } catch (err) {
