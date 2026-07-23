@@ -592,7 +592,28 @@ body {
   display: block;
   margin-bottom: 4px;
 }
-.triage-ask, .triage-sota, .triage-closes { color: #eaeaea; }
+.triage-ask, .triage-recommendation, .triage-sota, .triage-delta, .triage-closes { color: #eaeaea; }
+
+.triage-recommendation {
+  border-left: 3px solid #0a84ff66;
+  padding-left: 12px;
+}
+
+.triage-sota {
+  border-left: 3px solid #34c75966;
+  padding-left: 12px;
+  background: #34c75908;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+.triage-delta {
+  border-left: 3px solid #ffd60a66;
+  padding-left: 12px;
+  background: #ffd60a08;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
 .triage-meta {
   display: flex;
   gap: 10px;

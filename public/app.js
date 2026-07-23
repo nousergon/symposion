@@ -116,6 +116,8 @@ function renderTriageItem() {
   const item = triageItems[triageIndex];
   const ask = extractAsk(item.body);
   const recommendation = extractRecommendation(item.body);
+  const sota = extractSota(item.body);
+  const delta = extractDelta(item.body);
   const closesWhen = findClosesWhen(item.body);
   const optionText = item.isPr ? `PR ${item.repo}#${item.number}` : `Issue ${item.repo}#${item.number}`;
 
@@ -139,7 +141,9 @@ function renderTriageItem() {
       <div class="triage-card-title">${escapeHtml(item.title)}</div>
       <div class="triage-card-body">
         ${ask ? `<div class="triage-ask"><span class="triage-label">Ask:</span> ${escapeHtml(ask)}</div>` : ""}
-        ${recommendation ? `<div class="triage-sota"><span class="triage-label">SOTA / Recommendation:</span> ${escapeHtml(recommendation)}</div>` : ""}
+        ${recommendation ? `<div class="triage-recommendation"><span class="triage-label">Recommendation:</span> ${escapeHtml(recommendation)}</div>` : ""}
+        ${sota ? `<div class="triage-sota"><span class="triage-label">SOTA Approach:</span> ${escapeHtml(sota)}</div>` : ""}
+        ${delta ? `<div class="triage-delta"><span class="triage-label">Delta:</span> ${escapeHtml(delta)}</div>` : ""}
         ${closesWhen ? `<div class="triage-closes"><span class="triage-label">Closes when:</span> ${escapeHtml(closesWhen)}</div>` : ""}
         <div class="triage-meta">
           <span class="triage-meta-author">${escapeHtml(item.author)}</span>
@@ -274,7 +278,27 @@ function extractAsk(body) {
   return body.slice(0, 300).trim();
 }
 function extractRecommendation(body) {
-  const s = body.match(/##\s*SOTA\b|##\s*Recommendation|##\s*Approach/i);
+  const m = body.match(/\*\*Recommendation:\*\*\s*([\s\S]*?)(?:\n\n|\n#{1,3}|$)/i);
+  if (m) return m[1].trim();
+  const s = body.match(/##\s*Recommendation\b|##\s*Approach\b/i);
+  if (!s) return null;
+  const after = body.slice(s.index + s[0].length).trim();
+  const nextH = after.search(/\n#{1,3}\s/);
+  return (nextH > 0 ? after.slice(0, nextH) : after.slice(0, 400)).trim();
+}
+function extractSota(body) {
+  const m = body.match(/\*\*SOTA:\*\*\s*([\s\S]*?)(?:\n\n|\n#{1,3}|$)/i);
+  if (m) return m[1].trim();
+  const s = body.match(/##\s*SOTA\b/i);
+  if (!s) return null;
+  const after = body.slice(s.index + s[0].length).trim();
+  const nextH = after.search(/\n#{1,3}\s/);
+  return (nextH > 0 ? after.slice(0, nextH) : after.slice(0, 400)).trim();
+}
+function extractDelta(body) {
+  const m = body.match(/\*\*Delta:\*\*\s*([\s\S]*?)(?:\n\n|\n#{1,3}|$)/i);
+  if (m) return m[1].trim();
+  const s = body.match(/##\s*Delta\b/i);
   if (!s) return null;
   const after = body.slice(s.index + s[0].length).trim();
   const nextH = after.search(/\n#{1,3}\s/);
