@@ -732,6 +732,28 @@ function escapeHtml(s) {
   return div.innerHTML;
 }
 
+// breaks:true because message text (both sides of the chat) is conversational,
+// not authored markdown - a lone "\n" is meant to read as a line break the way
+// it did under the old textContent+pre-wrap rendering, not get merged into the
+// previous line the way strict CommonMark treats a single soft break.
+marked.setOptions({ gfm: true, breaks: true });
+
+// Rendered markdown can come from an LLM persona's output, so it goes through
+// DOMPurify before ever reaching innerHTML rather than trusting marked's HTML
+// output directly. Links get forced to a new tab/noreferrer the same way the
+// handoff-card URL link elsewhere in this file already does - markdown output
+// otherwise has no target/rel and would navigate the SPA away in-place.
+DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+  if (node.tagName === "A") {
+    node.setAttribute("target", "_blank");
+    node.setAttribute("rel", "noopener noreferrer");
+  }
+});
+
+function renderMarkdown(text) {
+  return DOMPurify.sanitize(marked.parse(text ?? ""));
+}
+
 /**
  * Extensions browsers do NOT have a registered MIME type for, so `file.type`
  * comes back as "" for every one of them (confirmed: Chrome/Safari report
@@ -919,7 +941,9 @@ function toolLiveLabel(t) {
 function ensureMsgTextEl(bubble) {
   let el = bubble.querySelector(":scope > .msg-text");
   if (!el) {
-    el = document.createElement("span");
+    // div, not span: rendered markdown includes block-level children (p,
+    // table, pre, ul) that phrasing content (a span) isn't valid to contain.
+    el = document.createElement("div");
     el.className = "msg-text";
     bubble.insertBefore(el, bubble.firstChild);
   }
@@ -1175,7 +1199,13 @@ function connectStream(personaId) {
         streamingBubble.className = "msg assistant";
         chatMessagesEl.appendChild(streamingBubble);
       }
-      ensureMsgTextEl(streamingBubble).textContent += evt.text;
+      // Raw markdown source accumulates in a dataset attribute (not the
+      // rendered DOM) because a partial delta chunk can land mid-token (e.g.
+      // "**bo" then "ld**") - re-parsing the full buffer on every chunk is
+      // what keeps that from ever rendering as a broken half-formatted tag.
+      const textEl = ensureMsgTextEl(streamingBubble);
+      textEl.dataset.raw = (textEl.dataset.raw ?? "") + evt.text;
+      textEl.innerHTML = renderMarkdown(textEl.dataset.raw);
       chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
     } else if (evt.type === "tool") {
       // First real signal of activity on a turn that opens with tool calls
@@ -1200,7 +1230,11 @@ function connectStream(personaId) {
         chatMessagesEl.appendChild(streamingBubble);
       }
       if (streamingBubble) {
-        if (evt.text) ensureMsgTextEl(streamingBubble).textContent = evt.text;
+        if (evt.text) {
+          const textEl = ensureMsgTextEl(streamingBubble);
+          textEl.dataset.raw = evt.text;
+          textEl.innerHTML = renderMarkdown(evt.text);
+        }
         // The live in-progress list is superseded by the full collapsed
         // detail toggle below - drop it rather than show the same tool
         // calls twice.
@@ -1320,7 +1354,9 @@ async function loadMessages() {
   for (const m of messages) {
     const div = document.createElement("div");
     div.className = `msg ${m.role}` + (m.blocked ? " blocked" : "") + (m.viaRemote ? " via-remote" : "");
-    ensureMsgTextEl(div).textContent = m.text;
+    const textEl = ensureMsgTextEl(div);
+    textEl.dataset.raw = m.text ?? "";
+    textEl.innerHTML = renderMarkdown(m.text);
     renderAttachments(div, m.attachments, activePersonaId);
     if (!m.pending) {
       const toggle = buildToolPartsToggle(m.parts);
@@ -1693,10 +1729,12 @@ chatFormEl.addEventListener("submit", async (e) => {
   stagedAttachments = [];
   renderStagedAttachments();
 
-  // optimistic render of the user's own message
+  // optimistic render of the user's own message - same renderMarkdown() path
+  // loadMessages() uses on reload, so the bubble doesn't visibly reformat the
+  // moment the page refetches history.
   const userDiv = document.createElement("div");
   userDiv.className = "msg user";
-  userDiv.textContent = text;
+  userDiv.innerHTML = renderMarkdown(text);
   for (const a of stagedForRender) {
     const row = userDiv.querySelector(":scope > .msg-attachments") ?? userDiv.appendChild(Object.assign(document.createElement("div"), { className: "msg-attachments" }));
     if (a.mime?.startsWith("image/")) {

@@ -415,6 +415,30 @@ body {
 
 .msg-text:empty { display: none; }
 
+/* .msg-text renders marked's HTML output, which is block-level (p, table,
+   pre, ul...) with real markup between tags - the pre-wrap inherited from
+   .msg above (kept for the plain-text thinking/attachment bits) would treat
+   marked's own inter-tag newlines as literal blank lines, so it's reset back
+   to normal here and paragraph/list spacing is handled with margins instead. */
+.msg-text { white-space: normal; }
+.msg-text p { margin: 0 0 8px; }
+.msg-text p:last-child { margin-bottom: 0; }
+.msg-text ul, .msg-text ol { margin: 4px 0 8px; padding-left: 20px; }
+.msg-text li { margin: 2px 0; }
+.msg-text li:last-child { margin-bottom: 0; }
+.msg-text blockquote { margin: 4px 0; padding-left: 10px; border-left: 2px solid #ffffff33; opacity: 0.85; }
+.msg-text h1, .msg-text h2, .msg-text h3, .msg-text h4 { margin: 8px 0 6px; line-height: 1.25; }
+.msg-text h1:first-child, .msg-text h2:first-child, .msg-text h3:first-child, .msg-text h4:first-child { margin-top: 0; }
+.msg-text hr { border: none; border-top: 1px solid #ffffff22; margin: 10px 0; }
+.msg-text a { color: #6ea8ff; }
+.msg.user .msg-text a { color: #ffffff; text-decoration: underline; }
+.msg-text code { background: #ffffff1a; padding: 1px 5px; border-radius: 4px; font-family: monospace; font-size: 0.9em; }
+.msg-text pre { background: #1c1c1e; border: 1px solid #3a3a3c; border-radius: 8px; padding: 10px; margin: 4px 0 8px; overflow-x: auto; }
+.msg-text pre code { background: none; padding: 0; }
+.msg-text table { border-collapse: collapse; margin: 4px 0 8px; font-size: 13px; max-width: 100%; display: block; overflow-x: auto; }
+.msg-text th, .msg-text td { border: 1px solid #ffffff2a; padding: 4px 8px; text-align: left; }
+.msg-text th { background: #ffffff11; }
+
 /* Subagent (Agent tool) dispatches get their own accent so they read as
    "a subagent is working" rather than a generic tool call - the CLI gives no
    visibility into the subagent's own steps, so this + the elapsed timer in
