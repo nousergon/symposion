@@ -49,6 +49,18 @@ function saveRegistry(registry) {
   fs.writeFileSync(REGISTRY_FILE, JSON.stringify(registry, null, 2));
 }
 
+// CodeQL js/prototype-polluting-assignment: `registry` is a plain object
+// keyed by directory path, and bracket-assigning a key literally equal to
+// "__proto__" mutates Object.prototype instead of adding an own property.
+// directory is validated upstream (absolute + existing dir, index.mjs
+// POST /api/personas) so this can't be reached in practice today, but the
+// guard is one line and makes the registry safe independent of that.
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+function assertSafeRegistryKey(key) {
+  if (UNSAFE_KEYS.has(key)) throw new Error(`Refusing unsafe registry key: ${key}`);
+  return key;
+}
+
 /** signal 0 is a pure existence probe - throws ESRCH if the pid is gone, does not actually signal the process. */
 function isProcessAlive(pid) {
   try {
@@ -91,7 +103,7 @@ export class OpenCodeServerPool {
       entry.port = recorded.port;
       entry.client = createOpencodeClient({ baseUrl: `http://127.0.0.1:${recorded.port}` });
       entry.proc = null; // predates this pool instance - not ours to own or kill
-      this._pumpEvents(recorded.port, entry.events).catch((err) => console.error(`[pool] event pump for adopted ${directory} died:`, err));
+      this._pumpEvents(recorded.port, entry.events).catch((err) => console.error(`[pool] event pump for adopted ${directory} died: ${err}`));
       return;
     }
     if (recorded) {
@@ -148,13 +160,13 @@ export class OpenCodeServerPool {
           entry.port = port;
           entry.client = createOpencodeClient({ baseUrl: `http://127.0.0.1:${port}` });
           entry.proc = proc;
-          this.registry[directory] = { port, pid: proc.pid };
+          this.registry[assertSafeRegistryKey(directory)] = { port, pid: proc.pid };
           saveRegistry(this.registry);
-          this._pumpEvents(port, entry.events).catch((err) => console.error(`[pool] event pump for ${directory} died:`, err));
+          this._pumpEvents(port, entry.events).catch((err) => console.error(`[pool] event pump for ${directory} died: ${err}`));
           resolveReady();
         }
       });
-      proc.stderr.on("data", (d) => console.error(`[opencode-serve:${directory}]`, d.toString()));
+      proc.stderr.on("data", (d) => console.error(`[opencode-serve:${directory}] ${d.toString()}`));
       proc.on("exit", (code) => {
         console.error(`[opencode-serve:${directory}] exited (code=${code})`);
         clearTimeout(readyTimeout);

@@ -35,6 +35,18 @@ import path from "node:path";
 const CLAUDE_CONFIG_PATH = path.join(os.homedir(), ".claude.json");
 const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects");
 
+// CodeQL js/prototype-polluting-assignment: config.projects is a plain
+// object keyed by directory path, and bracket-assigning a key literally
+// equal to "__proto__" mutates Object.prototype instead of adding an own
+// property. dir is validated upstream (absolute + existing dir, index.mjs
+// POST /api/personas) so this can't be reached in practice today, but the
+// guard is one line and makes this safe independent of that.
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+function assertSafeKey(key) {
+  if (UNSAFE_KEYS.has(key)) throw new Error(`Refusing unsafe key: ${key}`);
+  return key;
+}
+
 /**
  * The claude CLI's mapping from a session cwd to its transcript directory
  * name under ~/.claude/projects: every non-alphanumeric character becomes a
@@ -76,7 +88,7 @@ export function ensureWorkspaceTrusted(dir) {
   const entry = config.projects[dir] ?? {};
   if (entry.hasTrustDialogAccepted === true) return;
   entry.hasTrustDialogAccepted = true;
-  config.projects[dir] = entry;
+  config.projects[assertSafeKey(dir)] = entry;
   const tmpPath = `${CLAUDE_CONFIG_PATH}.symposion-tmp-${process.pid}`;
   fs.writeFileSync(tmpPath, JSON.stringify(config, null, 2));
   fs.renameSync(tmpPath, CLAUDE_CONFIG_PATH);
