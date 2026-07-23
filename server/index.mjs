@@ -18,6 +18,8 @@ import { resolveSecret } from "./secrets.mjs";
 import { ensureEgressProxy } from "./llm-egress-proxy.mjs";
 import { fetchQueue, itemToQuestion, postComment, removeLabels, addLabels, closeIssue, markPrReadyForReview } from "./decision-queue.mjs";
 
+import { loadRepoContext } from "./repo-context.mjs";
+
 const hub = new SseHub();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -384,12 +386,19 @@ function promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpda
 
     events.on("event", onEvent);
 
+    const cwd = persona.actualCwd ?? persona.workspaceDir;
+    const repoContext = loadRepoContext(cwd);
+    const systemPrompt = [
+      `Your name is ${persona.name}. If asked your name or who you are, identify yourself as ${persona.name}.`,
+      repoContext ? `\n── Repository context (${cwd}) ──\n\n${repoContext}` : "",
+    ].filter(Boolean).join("");
+
     client.session
       .promptAsync({
         path: { id: persona.sessionID },
         body: {
           model: { providerID: persona.providerID, modelID: persona.modelID },
-          system: `Your name is ${persona.name}. If asked your name or who you are, identify yourself as ${persona.name}.`,
+          system: systemPrompt,
           // FilePartInput.url accepts a data: URI for inline (non-workspace)
           // content - the standard mechanism for handing OpenCode a file that
           // doesn't already exist on disk in the session's workspace.
