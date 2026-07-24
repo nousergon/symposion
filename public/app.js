@@ -3,6 +3,7 @@ let providers = [];
 let claudeModels = [];
 let permissionModes = [];
 let effortLevels = [];
+let modelGroups = [];
 let defaults = null;
 let dirBrowserPath = null; // current directory shown in the workspace picker modal
 let selectedBackend = "api";
@@ -439,6 +440,8 @@ const modalEl = document.getElementById("new-agent-modal");
 const modalNameEl = document.getElementById("new-agent-name");
 const modalRandomizeNameEl = document.getElementById("new-agent-randomize-name");
 const modalModelEl = document.getElementById("new-agent-model");
+const modalTierEl = document.getElementById("new-agent-tier");
+const modalTierLabelEl = document.getElementById("new-agent-tier-label");
 const modalCancelEl = document.getElementById("new-agent-cancel");
 const modalCreateEl = document.getElementById("new-agent-create");
 const modalWorkspaceEl = document.getElementById("new-agent-workspace");
@@ -497,6 +500,11 @@ async function fetchEffortLevels() {
   return res.json();
 }
 
+async function fetchModelGroups() {
+  const res = await fetch("/api/model-groups");
+  return res.json();
+}
+
 async function fetchDefaults() {
   const res = await fetch("/api/defaults");
   return res.json();
@@ -527,6 +535,10 @@ function ttlLabel(p) {
 }
 
 function modelLabel(p) {
+  if (p.modelGroup) {
+    const group = modelGroups.find((g) => g.key === p.modelGroup);
+    return `Tier: ${group?.key ?? p.modelGroup} (${group?.resolvedModel ?? "?"})`;
+  }
   if (p.backend === "claude-code") {
     const model = claudeModels.find((m) => m.modelID === p.modelID);
     return `Claude Code / ${model?.name ?? p.modelID}`;
@@ -638,13 +650,27 @@ async function editPersona(p) {
   editingPersonaId = p.id;
   editNameEl.value = p.name;
   populateModelSelect(p.modelID, p.providerID, editModelEl, p.backend);
+  // Group-based personas lock the model picker (model is resolved from the
+  // group, not chosen directly); switching groups on edit is not supported
+  // in this iteration — delete and recreate to change tiers.
+  if (p.modelGroup) {
+    editModelEl.disabled = true;
+    editModelEl.title = `Model resolved from tier: ${p.modelGroup}`;
+  } else {
+    editModelEl.disabled = false;
+    editModelEl.title = "";
+  }
   populateEffortLevelSelect(editEffortModeEl, editEffortLabelEl, p.backend, p.effortLevel);
   editModalEl.hidden = false;
   editNameEl.focus();
   editNameEl.select();
 }
 
-editCancelEl.addEventListener("click", () => { editModalEl.hidden = true; });
+editCancelEl.addEventListener("click", () => {
+  editModalEl.hidden = true;
+  editModelEl.disabled = false;
+  editModelEl.title = "";
+});
 
 editSaveEl.addEventListener("click", async () => {
   const p = latestPersonas.find((pp) => pp.id === editingPersonaId);
@@ -1706,6 +1732,29 @@ async function loadMessages() {
  * modal's <select> and the target persona's (immutable) backend instead, so
  * both modals share this one population routine rather than duplicating it.
  */
+/**
+ * Populate the "Model tier" dropdown in the New Agent modal. Only visible
+ * for the API backend (hidden for claude-code, matching permission/effort).
+ * A tier selection auto-populates and locks the model picker; "Pick
+ * manually" restores free model selection.
+ */
+function populateTierSelect(backend = selectedBackend, preferredGroup = null) {
+  const show = backend === "api";
+  modalTierLabelEl.hidden = !show;
+  modalTierEl.hidden = !show;
+  if (!show) return;
+  modalTierEl.innerHTML = '<option value="">Pick manually</option>';
+  for (const g of modelGroups) {
+    const opt = document.createElement("option");
+    opt.value = g.key;
+    opt.textContent = `${g.key} — ${g.resolvedModel}`;
+    modalTierEl.appendChild(opt);
+  }
+  if (preferredGroup && modelGroups.some((g) => g.key === preferredGroup)) {
+    modalTierEl.value = preferredGroup;
+  }
+}
+
 function populateModelSelect(preferredModelID, preferredProviderID, selectEl = modalModelEl, backend = selectedBackend) {
   selectEl.innerHTML = "";
   if (backend === "claude-code") {
@@ -1788,10 +1837,25 @@ backendBtns.forEach((btn) => {
   btn.addEventListener("click", () => {
     selectedBackend = btn.dataset.backend;
     backendBtns.forEach((b) => b.classList.toggle("active", b === btn));
+    populateTierSelect();
     populateModelSelect();
     populatePermissionModeSelect();
     populateEffortLevelSelect();
   });
+});
+
+// Tier selection → auto-populate and lock the model picker
+modalTierEl.addEventListener("change", () => {
+  const selected = modelGroups.find((g) => g.key === modalTierEl.value);
+  if (selected) {
+    populateModelSelect(selected.modelID, selected.providerID);
+    modalModelEl.disabled = true;
+  } else {
+    // "Pick manually" — unlock and reset
+    modalModelEl.disabled = false;
+    const recipe = defaults?.lastRecipe;
+    populateModelSelect(recipe?.modelID, recipe?.providerID);
+  }
 });
 
 /**
@@ -1881,7 +1945,11 @@ newAgentBtn.addEventListener("click", async () => {
   if (claudeModels.length === 0) claudeModels = await fetchClaudeModels();
   if (permissionModes.length === 0) permissionModes = await fetchPermissionModes();
   if (effortLevels.length === 0) effortLevels = await fetchEffortLevels();
+  if (modelGroups.length === 0) modelGroups = await fetchModelGroups();
   defaults = await fetchDefaults(); // re-fetch every open, not just once - lastRecipe changes as agents get created
+
+  // Reset tier/model picker state before populating
+  modalModelEl.disabled = false;
 
   // Prefill from the most recently created agent's recipe instead of always
   // resetting to the hardcoded default - the common case is spinning up
@@ -1889,6 +1957,7 @@ newAgentBtn.addEventListener("click", async () => {
   const recipe = defaults?.lastRecipe;
   selectedBackend = recipe?.backend ?? "api";
   backendBtns.forEach((b) => b.classList.toggle("active", b.dataset.backend === selectedBackend));
+  populateTierSelect(selectedBackend, recipe?.modelGroup);
   populateModelSelect(recipe?.modelID, recipe?.providerID);
   populatePermissionModeSelect(recipe?.permissionMode);
   populateEffortLevelSelect(modalEffortModeEl, modalEffortLabelEl, selectedBackend, recipe?.effortLevel);
@@ -1907,21 +1976,30 @@ modalRandomizeNameEl.addEventListener("click", async () => {
   modalNameEl.select();
 });
 
-modalCancelEl.addEventListener("click", () => { modalEl.hidden = true; });
+modalCancelEl.addEventListener("click", () => {
+  modalEl.hidden = true;
+  modalModelEl.disabled = false;
+});
 
 modalCreateEl.addEventListener("click", async () => {
   // A blank name (user cleared the prefilled one) is fine - the server
   // generates a random star name of its own when name is omitted.
   const name = modalNameEl.value.trim();
-  const modelID = modalModelEl.value;
   const workspaceDir = modalWorkspaceEl.value;
+  const tier = modalTierEl.value || undefined;
 
-  const body = { name, backend: selectedBackend, modelID, workspaceDir };
-  if (selectedBackend === "api") {
-    body.providerID = modalModelEl.selectedOptions[0]?.dataset.providerId;
+  const body = { name, backend: selectedBackend, workspaceDir };
+  if (tier) {
+    // Group selection — server resolves via krepis router
+    body.modelGroup = tier;
   } else {
-    if (modalPermissionModeEl.value) body.permissionMode = modalPermissionModeEl.value;
-    if (modalEffortModeEl.value) body.effortLevel = modalEffortModeEl.value;
+    body.modelID = modalModelEl.value;
+    if (selectedBackend === "api") {
+      body.providerID = modalModelEl.selectedOptions[0]?.dataset.providerId;
+    } else {
+      if (modalPermissionModeEl.value) body.permissionMode = modalPermissionModeEl.value;
+      if (modalEffortModeEl.value) body.effortLevel = modalEffortModeEl.value;
+    }
   }
 
   const res = await fetch("/api/personas", {

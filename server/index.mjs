@@ -3,6 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
 import { ClaudeCodeSession, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, CLAUDE_EFFORT_LEVELS, CLAUDE_BIN } from "./claude-code-backend.mjs";
@@ -81,6 +82,75 @@ const API_DEFAULT = { providerID: "deepseek", modelID: "deepseek-chat" };
 // aren't working on symposion, and the old default silently pointed every
 // unconfigured persona at symposion's own working tree.
 const DEFAULT_WORKSPACE = DEV_ROOT;
+
+// ── Model-group resolution via krepis router ──────────────────────────
+// Group definitions live in krepis (krepis/src/krepis/router.py —
+// _builtin_model_list / LLM_MODEL_REGISTRY.yaml). Symposion calls
+// `python3 -m krepis.router resolve <group>` to get the current model
+// for a tier, then translates the krepis model name into Symposion's
+// (providerID, modelID) vocabulary via the bridge below.
+
+const KREPIS_DIR = path.join(os.homedir(), "Development", "krepis");
+const KREPIS_PYTHON = path.join(KREPIS_DIR, ".venv", "bin", "python3");
+
+// The fleet's four model tiers. These keys are a stable convention, not
+// group definitions — which model each key resolves to is owned by krepis.
+const MODEL_GROUP_KEYS = ["low", "med", "high", "ultra"];
+
+// Translates krepis model names (the upstream model identifiers returned
+// by `python3 -m krepis.router resolve`) into Symposion's provider/model
+// space. One entry per model that appears in krepis groups. This is a
+// namespace bridge, NOT group definitions — groups are resolved by krepis.
+const KREPIS_BRIDGE = {
+  "deepseek-v4-flash":  { providerID: "deepseek", modelID: "deepseek-chat" },
+  "deepseek-v4-pro":    { providerID: "deepseek", modelID: "deepseek-reasoner" },
+  "gemini-2.5-flash":   { providerID: "gemini",  modelID: "gemini-2.0-flash" },
+  "gemini-2.5-pro":     { providerID: "gemini",  modelID: "gemini-2.5-pro-exp-03-25" },
+};
+// OpenRouter models are intentionally absent — Symposion has no OpenRouter
+// provider. When krepis resolves a group to an OpenRouter model (e.g.
+// ultra → moonshotai/kimi-k3), the bridge returns null and the group is
+// unavailable until litellm cooldown shifts it to an egress-proxy fallback.
+
+let cachedModelGroups = null; // resolved once at startup, re-resolved on restart
+
+function krepisResolve(group) {
+  return new Promise((resolve, reject) => {
+    execFile(KREPIS_PYTHON, ["-m", "krepis.router", "resolve", group], {
+      cwd: KREPIS_DIR,
+      timeout: 15000,
+    }, (err, stdout, stderr) => {
+      if (err) return reject(new Error(`krepis resolve ${group} failed: ${stderr || err.message}`));
+      resolve(stdout.trim());
+    });
+  });
+}
+
+async function resolveModelGroups() {
+  if (cachedModelGroups) return cachedModelGroups;
+  const resolved = [];
+  for (const key of MODEL_GROUP_KEYS) {
+    try {
+      const model = await krepisResolve(key);
+      const bridge = KREPIS_BRIDGE[model];
+      if (bridge) {
+        resolved.push({ key, ...bridge, resolvedModel: model });
+      } else {
+        console.warn(`[model-groups] ${key} → "${model}" has no Symposion bridge entry (OpenRouter / unknown provider) — group unavailable`);
+      }
+    } catch (err) {
+      console.error(`[model-groups] failed to resolve ${key}:`, err.message);
+    }
+  }
+  cachedModelGroups = resolved;
+  return resolved;
+}
+
+/** Look up a single group's resolved (providerID, modelID) from the cache. */
+function resolveModelGroup(group) {
+  if (!cachedModelGroups) return null;
+  return cachedModelGroups.find((g) => g.key === group) ?? null;
+}
 
 /**
  * Persona shape (union over both backends):
@@ -521,6 +591,7 @@ function personaSummary(p) {
     backend: p.backend,
     providerID: p.providerID ?? null,
     modelID: p.modelID,
+    modelGroup: p.modelGroup ?? null,
     workspaceDir: p.workspaceDir,
     workspaceName: path.basename(p.workspaceDir),
     isolated: p.isolated ?? false,
@@ -631,6 +702,15 @@ app.get("/api/defaults", (req, res) => {
   res.json({ apiDefault: API_DEFAULT, claudeCodeDefault: CLAUDE_CODE_DEFAULT, defaultWorkspace: DEFAULT_WORKSPACE, lastRecipe });
 });
 
+app.get("/api/model-groups", async (req, res) => {
+  try {
+    res.json(await resolveModelGroups());
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
 /**
  * A fresh random star name, excluding names already in use by a live
  * persona - backs the "New Agent" modal's auto-filled name field and its
@@ -700,7 +780,7 @@ function resolveWorkspaceDir(raw) {
 
 app.post("/api/personas", async (req, res) => {
   try {
-    const { backend, providerID, modelID, permissionMode, effortLevel } = req.body ?? {};
+    let { backend, providerID, modelID, modelGroup, permissionMode, effortLevel } = req.body ?? {};
     // A name is never required to create a persona - an untyped/blank field
     // just gets a random star name, excluding whatever's already in use.
     const name = (req.body?.name ?? "").trim() || randomStarName([...personas.values()].map((p) => p.name));
@@ -708,7 +788,22 @@ app.post("/api/personas", async (req, res) => {
     if (backend !== "api" && backend !== "claude-code") {
       return res.status(400).json({ error: 'backend must be "api" or "claude-code"' });
     }
-    if (!modelID) return res.status(400).json({ error: "modelID is required" });
+
+    // Resolve modelGroup → concrete providerID/modelID via krepis router.
+    // Group wins over any separately provided providerID/modelID.
+    if (modelGroup) {
+      if (!MODEL_GROUP_KEYS.includes(modelGroup)) {
+        return res.status(400).json({ error: `unrecognized modelGroup: ${modelGroup}. Valid: ${MODEL_GROUP_KEYS.join(", ")}` });
+      }
+      const resolved = resolveModelGroup(modelGroup);
+      if (!resolved) {
+        return res.status(503).json({ error: `modelGroup ${modelGroup} is not currently available (krepis resolution pending or failed)` });
+      }
+      providerID = resolved.providerID;
+      modelID = resolved.modelID;
+    }
+
+    if (!modelID && !modelGroup) return res.status(400).json({ error: "modelID or modelGroup is required" });
     if (permissionMode && !CLAUDE_PERMISSION_MODES.some((m) => m.value === permissionMode)) {
       return res.status(400).json({ error: `unrecognized permissionMode: ${permissionMode}` });
     }
@@ -750,7 +845,8 @@ app.post("/api/personas", async (req, res) => {
       const session = await entry.client.session.create({ body: { title: name } });
       const id = session.data.id;
       persona = {
-        id, name, backend, providerID, modelID, workspaceDir, actualCwd, isolated, worktreeBranch,
+        id, name, backend, providerID, modelID, modelGroup: modelGroup ?? null,
+        workspaceDir, actualCwd, isolated, worktreeBranch,
         sessionID: id,
         opencodeEntry: null,
         lastActivityTs: Date.now(),
@@ -787,7 +883,8 @@ app.post("/api/personas", async (req, res) => {
 
       const claudeSession = new ClaudeCodeSession(id, modelID, name, actualCwd, false, permissionMode || null, effortLevel || null);
       persona = {
-        id, name, backend, modelID, workspaceDir, actualCwd, isolated, worktreeBranch,
+        id, name, backend, modelID, modelGroup: modelGroup ?? null,
+        workspaceDir, actualCwd, isolated, worktreeBranch,
         permissionMode: permissionMode || null,
         effortLevel: effortLevel || null,
         claudeSession,
@@ -809,7 +906,7 @@ app.post("/api/personas", async (req, res) => {
     // deliberately excluded - each new agent is typically for a different
     // repo, so carrying it forward would be a wrong-more-often-than-right
     // default rather than a helpful one).
-    lastRecipe = { backend, providerID: providerID ?? null, modelID, permissionMode: permissionMode ?? null, effortLevel: effortLevel ?? null };
+    lastRecipe = { backend, providerID: providerID ?? null, modelID, modelGroup: modelGroup ?? null, permissionMode: permissionMode ?? null, effortLevel: effortLevel ?? null };
     settings.lastRecipe = lastRecipe;
     saveSettings(settings);
 
@@ -913,9 +1010,28 @@ app.patch("/api/personas/:id", async (req, res) => {
   const name = (req.body?.name ?? "").trim();
   if (!name) return res.status(400).json({ error: "name is required" });
 
-  const modelID = req.body?.modelID;
-  const providerID = req.body?.providerID;
+  let modelID = req.body?.modelID;
+  let providerID = req.body?.providerID;
+  const modelGroup = req.body?.modelGroup;
   const effortLevel = req.body?.effortLevel;
+
+  // Resolve modelGroup → concrete providerID/modelID via krepis router.
+  if (modelGroup) {
+    if (!MODEL_GROUP_KEYS.includes(modelGroup)) {
+      return res.status(400).json({ error: `unrecognized modelGroup: ${modelGroup}. Valid: ${MODEL_GROUP_KEYS.join(", ")}` });
+    }
+    const resolved = resolveModelGroup(modelGroup);
+    if (!resolved) {
+      return res.status(503).json({ error: `modelGroup ${modelGroup} is not currently available` });
+    }
+    providerID = resolved.providerID;
+    modelID = resolved.modelID;
+    persona.modelGroup = modelGroup;
+  } else if (req.body?.modelID !== undefined) {
+    // User sent a specific modelID — clear any previous group.
+    persona.modelGroup = null;
+  }
+
   const modelChanged = !!modelID && modelID !== persona.modelID;
   const providerChanged = persona.backend === "api" && !!providerID && providerID !== persona.providerID;
   const effortChanged = persona.backend === "claude-code" && effortLevel !== undefined && (effortLevel || null) !== (persona.effortLevel || null);
@@ -1342,6 +1458,17 @@ app.post("/api/decision-queue/ruling", async (req, res) => {
 });
 
 const PORT = process.env.SYMPOSION_PORT || 5173;
+
+// Pre-resolve model groups at startup so the cache is warm before the
+// first /api/model-groups request or persona creation — krepis CLI calls
+// are 1-2s each (litellm Router init), so doing this now avoids a slow
+// first request.
+resolveModelGroups().then((groups) => {
+  console.log(`[model-groups] resolved ${groups.length} groups: ${groups.map((g) => g.key).join(", ")}`);
+}).catch((err) => {
+  console.warn("[model-groups] startup resolution failed:", err.message);
+});
+
 // Bind explicitly to loopback - omitting the host binds ALL interfaces by
 // default (confirmed live: `lsof -iTCP:5173` showed `TCP *:5173`), meaning
 // anyone else on the same network (e.g. an Airbnb guest on the same WiFi)

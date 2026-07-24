@@ -120,6 +120,7 @@ export function toRecord(p) {
     backend: p.backend,
     providerID: p.providerID ?? null,
     modelID: p.modelID,
+    modelGroup: p.modelGroup ?? null,
     workspaceDir: p.workspaceDir,
     actualCwd: p.actualCwd ?? p.workspaceDir,
     isolated: p.isolated ?? false,
