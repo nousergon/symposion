@@ -26,3 +26,18 @@ jobs:
         run: npm ci
       - name: Test
         run: npm test
+
+  lint:
+    name: lint (Node.js)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Lint
+        run: npm run lint
