@@ -705,6 +705,26 @@ async function deletePersona(p) {
 
 async function refreshPersonas() {
   const personas = await fetchPersonas();
+
+  // Diff against the previous snapshot for working→idle transitions on
+  // non-active personas — the SSE stream is only kept open for the
+  // currently active persona (connectStream closes it on persona switch),
+  // so "done" events are never delivered client-side for a background
+  // persona. The 5s GET /api/personas poll is the only client-side signal
+  // that catches these transitions, and nothing currently diffs it.
+  // Server-side Web Push (notifyTurnFinished in index.mjs) already fires
+  // for this case (presence shows a different persona as active), so the
+  // OS notification is covered — what's missing is the title prefix that
+  // a glance at an open tab relies on, which markReplyUnseen handles.
+  const prev = latestPersonas;
+  for (const p of personas) {
+    if (p.id === activePersonaId) continue;
+    const old = prev.find((o) => o.id === p.id);
+    if (old && old.working && !p.working) {
+      markReplyUnseen();
+    }
+  }
+
   latestPersonas = personas;
   renderPersonaList(personas);
   const active = personas.find((p) => p.id === activePersonaId);
