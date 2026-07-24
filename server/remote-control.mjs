@@ -102,6 +102,7 @@ const RC_URL_RE = /https:\/\/claude\.ai\/code(?:\/session_[A-Za-z0-9_]+|\?enviro
 // CSI sequences (colors, cursor movement) and OSC sequences (terminal title) -
 // the interactive UI interleaves these heavily; stripping them from the
 // accumulated buffer is what makes the URL regex see contiguous text.
+// eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 
 /**
