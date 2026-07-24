@@ -2,7 +2,7 @@ import express from "express";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
 import { ClaudeCodeSession, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, CLAUDE_EFFORT_LEVELS, CLAUDE_BIN } from "./claude-code-backend.mjs";
@@ -284,8 +284,77 @@ function promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpda
   // already the final/complete cost+tokens by the time session.idle fires.
   let usage = null;
 
+  // Build system prompt and compute request hash BEFORE the async work,
+  // so dedup detection runs synchronously even if the event loop backs up.
+  const cwd = persona.actualCwd ?? persona.workspaceDir;
+  const repoContext = loadRepoContext(cwd);
+  const systemPrompt = [
+    `Your name is ${persona.name}. If asked your name or who you are, identify yourself as ${persona.name}.`,
+    repoContext ? `\n── Repository context (${cwd}) ──\n\n${repoContext}` : "",
+  ].filter(Boolean).join("");
+
+  // Hash the request body so we can detect retry loops from ANY source
+  // (SDK-internal retry, agent loop, client re-send). The hash covers
+  // everything that determines the upstream request: model, system prompt,
+  // user text, and attachment metadata. See symposion#59.
+  const requestBody = JSON.stringify({
+    model: { providerID: persona.providerID, modelID: persona.modelID },
+    system: systemPrompt,
+    text,
+    attachments: (attachments ?? []).map((a) => ({ mime: a.mime, filename: a.filename, len: a.base64?.length ?? 0 })),
+  });
+  const requestHash = createHash("sha256").update(requestBody).digest("hex").slice(0, 16);
+
+  // Dedup gate: if the SAME request hash has been sent 3+ times within a
+  // 10-minute window, this is almost certainly a stuck retry loop burning
+  // real upstream tokens (the egress proxy forwards every one — symposion#59).
+  // Block it BEFORE another expensive promptAsync call.
+  const now = Date.now();
+  const DEDUP_WINDOW_MS = 10 * 60 * 1000;
+  const DEDUP_MAX_ATTEMPTS = 3;
+  persona._requestHashes ??= [];
+  persona._requestHashes = persona._requestHashes.filter((r) => now - r.ts < DEDUP_WINDOW_MS);
+  const recentDupes = persona._requestHashes.filter((r) => r.hash === requestHash);
+  if (recentDupes.length >= DEDUP_MAX_ATTEMPTS) {
+    const elapsedS = Math.round((now - recentDupes[0].ts) / 1000);
+    const kbSize = Math.round(JSON.stringify({ text, system: systemPrompt }).length / 1024);
+    console.error(
+      `[dedup:${persona.id}] blocking retry loop — request hash ${requestHash} seen ${recentDupes.length + 1} times in ${elapsedS}s (~${kbSize}KB each)`,
+    );
+    return Promise.reject(
+      new Error(
+        `Identical ${kbSize}KB request sent ${recentDupes.length + 1} times in ${elapsedS}s — retry loop blocked. ` +
+          `The persona is stuck resending the same prompt without a successful response. ` +
+          `Check the upstream provider status and the persona's conversation history.`,
+      ),
+    );
+  }
+  persona._requestHashes.push({ hash: requestHash, ts: now });
+
   return new Promise((resolve, reject) => {
+    // Soft guard timer: resets on permission/question events so a persona
+    // waiting on a human doesn't spuriously time out. 5 minutes is enough
+    // for any normal turn processing.
     let timeout = setTimeout(onTimeout, 5 * 60 * 1000);
+
+    // Hard guard timer: NEVER resets. Guarantees the turn ends even if the
+    // soft timer is repeatedly reset or the OpenCode SDK internally retries
+    // the upstream request (below symposion's abstraction, observable only
+    // as identical bodies at the egress proxy — symposion#59). 15 minutes
+    // is generous enough for the longest legitimate turn (multiple subagent
+    // dispatches) while still capping a cost-leaking retry loop.
+    const HARD_TIMEOUT_MS = 15 * 60 * 1000;
+    const hardTimeout = setTimeout(() => {
+      console.error(
+        `[hard-timeout:${persona.id}] turn exceeded ${HARD_TIMEOUT_MS / 60000}-minute hard limit — request hash ${requestHash}`,
+      );
+      cleanup();
+      reject(
+        new Error(
+          `OpenCode turn timed out after ${HARD_TIMEOUT_MS / 60000} minutes (hard limit — request hash ${requestHash})`,
+        ),
+      );
+    }, HARD_TIMEOUT_MS);
 
     function onTimeout() {
       cleanup();
@@ -384,17 +453,11 @@ function promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpda
 
     function cleanup() {
       clearTimeout(timeout);
+      clearTimeout(hardTimeout);
       events.off("event", onEvent);
     }
 
     events.on("event", onEvent);
-
-    const cwd = persona.actualCwd ?? persona.workspaceDir;
-    const repoContext = loadRepoContext(cwd);
-    const systemPrompt = [
-      `Your name is ${persona.name}. If asked your name or who you are, identify yourself as ${persona.name}.`,
-      repoContext ? `\n── Repository context (${cwd}) ──\n\n${repoContext}` : "",
-    ].filter(Boolean).join("");
 
     client.session
       .promptAsync({
