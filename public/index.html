@@ -66,6 +66,10 @@
         <input id="new-agent-workspace" type="text" placeholder="/path/to/any/project" autocomplete="off" />
         <button type="button" id="new-agent-browse-btn">Browse…</button>
       </div>
+      <label id="new-agent-tier-label" hidden>Model tier</label>
+      <select id="new-agent-tier" hidden>
+        <option value="">Pick manually</option>
+      </select>
       <label>Model</label>
       <select id="new-agent-model"></select>
       <label id="new-agent-permission-label" hidden>Permission policy</label>
