@@ -455,6 +455,13 @@ const dirBrowserListEl = document.getElementById("dir-browser-list");
 const dirBrowserCancelEl = document.getElementById("dir-browser-cancel");
 const dirBrowserSelectEl = document.getElementById("dir-browser-select");
 
+// Quick Agents
+const quickAgentsRowEl = document.getElementById("quick-agents-row");
+const manageQuickAgentsModalEl = document.getElementById("manage-quick-agents-modal");
+const manageQuickAgentsListEl = document.getElementById("manage-quick-agents-list");
+const manageQuickAgentsCloseEl = document.getElementById("manage-quick-agents-close");
+const saveQuickAgentBtn = document.getElementById("new-agent-save-quick");
+
 // The composer is a textarea that grows with content (capped by the
 // max-height/overflow-y in .chat-input textarea) - height must be
 // recomputed after every value change, not just typed input, since
@@ -512,6 +519,93 @@ async function fetchBrowseDir(dirPath) {
   const url = dirPath ? `/api/browse-dir?path=${encodeURIComponent(dirPath)}` : "/api/browse-dir";
   const res = await fetch(url);
   return res.json();
+}
+
+async function fetchQuickAgents() {
+  const res = await fetch("/api/quick-agents");
+  return res.json();
+}
+
+let quickAgents = [];
+
+function renderQuickAgentsRow() {
+  quickAgentsRowEl.innerHTML = "";
+  for (const qa of quickAgents) {
+    const chip = document.createElement("button");
+    chip.className = "quick-agent-chip";
+    chip.dataset.id = qa.id;
+    chip.textContent = qa.label;
+    chip.addEventListener("click", async () => {
+      chip.disabled = true;
+      try {
+        const res = await fetch(`/api/quick-agents/${qa.id}/launch`, { method: "POST" });
+        if (!res.ok) { alert(`Failed to launch quick agent: ${(await res.json()).error}`); return; }
+        const persona = await res.json();
+        await selectPersona(persona);
+      } finally {
+        chip.disabled = false;
+      }
+    });
+    quickAgentsRowEl.appendChild(chip);
+  }
+
+  const manageBtn = document.createElement("button");
+  manageBtn.className = "quick-agent-chip manage";
+  manageBtn.textContent = "⚙";
+  manageBtn.title = "Manage quick agents";
+  manageBtn.addEventListener("click", openManageQuickAgents);
+  quickAgentsRowEl.appendChild(manageBtn);
+}
+
+async function openManageQuickAgents() {
+  const s = await fetchQuickAgents();
+  quickAgents = s;
+  manageQuickAgentsListEl.innerHTML = "";
+  if (s.length === 0) {
+    manageQuickAgentsListEl.textContent = "No quick agents saved yet.";
+  } else {
+    for (const qa of s) {
+      const row = document.createElement("div");
+      row.className = "manage-qa-row";
+      row.innerHTML = `
+        <span class="manage-qa-label">${qa.label}</span>
+        <button type="button" class="manage-qa-rename icon-btn" title="Rename">✎</button>
+        <button type="button" class="manage-qa-delete icon-btn" title="Delete">×</button>
+      `;
+      row.querySelector(".manage-qa-rename").addEventListener("click", () => {
+        const newLabel = prompt("Rename quick agent:", qa.label);
+        if (!newLabel?.trim()) return;
+        fetch(`/api/quick-agents/${qa.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ label: newLabel.trim() }),
+        }).then(async (r) => {
+          if (!r.ok) { alert(`Rename failed: ${(await r.json()).error}`); return; }
+          await refreshQuickAgents();
+          openManageQuickAgents();
+        });
+      });
+      row.querySelector(".manage-qa-delete").addEventListener("click", () => {
+        if (!confirm(`Delete quick agent "${qa.label}"?`)) return;
+        fetch(`/api/quick-agents/${qa.id}`, { method: "DELETE" }).then(async (r) => {
+          if (!r.ok) { alert(`Delete failed: ${(await r.json()).error}`); return; }
+          await refreshQuickAgents();
+          openManageQuickAgents();
+        });
+      });
+      manageQuickAgentsListEl.appendChild(row);
+    }
+  }
+  manageQuickAgentsModalEl.hidden = false;
+}
+
+manageQuickAgentsCloseEl.addEventListener("click", () => {
+  manageQuickAgentsModalEl.hidden = true;
+});
+
+async function refreshQuickAgents() {
+  quickAgents = await fetchQuickAgents();
+  renderQuickAgentsRow();
 }
 
 /**
@@ -1914,6 +2008,27 @@ modalCreateEl.addEventListener("click", async () => {
   await selectPersona(persona);
 });
 
+saveQuickAgentBtn.addEventListener("click", async () => {
+  const label = prompt("Name this quick agent:", modalModelEl.selectedOptions[0]?.textContent || "");
+  if (!label?.trim()) return;
+
+  const body = { label: label.trim(), backend: selectedBackend, modelID: modalModelEl.value };
+  if (selectedBackend === "api") {
+    body.providerID = modalModelEl.selectedOptions[0]?.dataset.providerId;
+  } else {
+    if (modalPermissionModeEl.value) body.permissionMode = modalPermissionModeEl.value;
+    if (modalEffortModeEl.value) body.effortLevel = modalEffortModeEl.value;
+  }
+
+  const res = await fetch("/api/quick-agents", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) { alert(`Failed to save quick agent: ${(await res.json()).error}`); return; }
+  await refreshQuickAgents();
+});
+
 chatAttachBtnEl.addEventListener("click", () => chatFileInputEl.click());
 
 chatFileInputEl.addEventListener("change", () => {
@@ -2090,5 +2205,6 @@ if (typeof Notification !== "undefined" && Notification.permission === "granted"
   providers = await fetchProviders();
   claudeModels = await fetchClaudeModels();
   await refreshPersonas();
+  await refreshQuickAgents();
 })();
 setInterval(refreshPersonas, 5000); // keep TTL dots live
