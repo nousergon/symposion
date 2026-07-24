@@ -172,7 +172,9 @@ export async function removeLabels(repo, number, labelNames) {
   for (const name of labelNames) {
     try {
       await ghApi(`/repos/nousergon/${encodeURIComponent(repo)}/issues/${n}/labels/${encodeURIComponent(name)}`, "DELETE");
-    } catch {}
+    } catch {
+      // Swallow — removal is best-effort; the issue may not have the label
+    }
   }
 }
 
@@ -197,7 +199,9 @@ export async function markPrReadyForReview(repo, number) {
     if (!nodeId) return;
     const gql = `mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { clientMutationId } }`;
     await ghGraphql(gql, { id: nodeId });
-  } catch {}
+  } catch {
+      // Swallow — API may reject if the PR was never made ready-for-review
+    }
 }
 
 /**
@@ -210,12 +214,18 @@ export async function fetchQueue() {
 
   const triageLabels = ["triage:session", "gate:operator", "gate:decision", "gate:device"];
   for (const repo of BACKLOG_REPOS) {
-    try { all.push(...(await listIssues(repo, triageLabels))); } catch {}
+    try { all.push(...(await listIssues(repo, triageLabels))); } catch {
+            // Swallow — transient API error; skip this repo and continue
+          }
   }
 
   for (const repo of CODE_REPOS) {
-    try { all.push(...(await listIssues(repo, ["triage:session"]))); } catch {}
-    try { all.push(...(await listPrs(repo, ["triage:session"]))); } catch {}
+    try { all.push(...(await listIssues(repo, ["triage:session"]))); } catch {
+            // Swallow — transient API error; skip this repo and continue
+          }
+    try { all.push(...(await listPrs(repo, ["triage:session"]))); } catch {
+            // Swallow — transient API error; skip this repo and continue
+          }
   }
 
   all.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));

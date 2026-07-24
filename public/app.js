@@ -119,7 +119,7 @@ function renderTriageItem() {
   const sota = extractSota(item.body);
   const delta = extractDelta(item.body);
   const closesWhen = findClosesWhen(item.body);
-  const optionText = item.isPr ? `PR ${item.repo}#${item.number}` : `Issue ${item.repo}#${item.number}`;
+  // optionText unused — info displayed in triageSummaryEl above
 
   triageSummaryEl.hidden = false;
   triageSummaryEl.textContent = `${triageIndex + 1} of ${triageItems.length} · ${item.repo}#${item.number}`;
