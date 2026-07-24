@@ -1,0 +1,34 @@
+feat: Quick Agents — one-click chip presets for recurring backend/model recipes
+
+Implements the full Quick Agents feature (nousergon/symposion#44):
+
+**Data model:** quickAgents array in data/settings.json with { id, label,
+backend, providerID, modelID, permissionMode, effortLevel } — no seed
+data, starts as [].
+
+**Server (index.mjs):**
+- Extracted createPersonaFromRecipe() from POST /api/personas — reusable
+  across normal creation and quick-agent launch, handles both api and
+  claude-code backends with worktree isolation.
+- GET  /api/quick-agents         — list presets
+- POST /api/quick-agents         — save a new preset (validated same as
+  persona creation)
+- PATCH /api/quick-agents/:id    — rename (label only)
+- DELETE /api/quick-agents/:id   — delete a preset
+- POST /api/quick-agents/:id/launch — create a persona from a preset,
+  reusing createPersonaFromRecipe (so lastRecipe is updated identically)
+
+**Client (public/app.js, index.html, style.css):**
+- Chip row between sidebar header and persona list, fetched on page load
+- Chip click → POST /api/quick-agents/:id/launch → selectPersona —
+  no modal
+- "⚙ Manage" button opens a manage modal with rename/delete per preset
+- "☆ Save as quick agent" button in the New Agent modal — saves the
+  modal's current recipe without creating a persona or closing the modal
+- Dark-theme styling matching the existing palette (#2c2c2e/#3a3a3c)
+
+All 30 existing tests pass.
+
+Closes nousergon/symposion#44
+
+Co-Authored-By: Claude <noreply@anthropic.com>

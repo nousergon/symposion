@@ -1,0 +1,17 @@
+fix(opencode-pool): add spawn error handler to prevent server crash on missing binary
+
+A failed spawn() of the opencode binary (ENOENT, EACCES, etc.) emits
+an "error" event on the child process. Without a listener, Node treats
+it as an uncaught exception and crashes the entire server process,
+killing every active persona/session.
+
+Add a proc.on("error") handler inside _spawn()'s Promise constructor
+that:
+- Rejects the readiness promise so callers see a normal failure
+  scoped to this one workspace/session
+- Cleans up the directory from the pool map
+- Clears the ready timeout to prevent double-rejection
+
+Closes nousergon/symposion#58
+
+Co-Authored-By: Claude <noreply@anthropic.com>

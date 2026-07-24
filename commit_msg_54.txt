@@ -1,0 +1,15 @@
+feat(ui): fire markReplyUnseen for background persona working→idle transitions
+
+The SSE stream is only open for the currently active persona (connectStream
+closes it on persona switch), so "done" events are never delivered
+client-side for a background persona. The 5s refreshPersonas() poll is
+the only client-side signal, and nothing previously diffed it for a
+working→idle transition.
+
+This change adds the diff: for every non-active persona that transitions
+from working→idle between poll ticks, markReplyUnseen() fires the same
+title-prefix notification path the "done" SSE handler uses.
+
+Part of nousergon/symposion#54 (gap 2)
+
+Co-Authored-By: Claude <noreply@anthropic.com>

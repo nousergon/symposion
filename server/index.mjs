@@ -566,6 +566,94 @@ function personaSummary(p) {
   };
 }
 
+/**
+ * Shared persona creation from a validated recipe — extracted from the
+ * POST /api/personas handler so quick-agent launches (and any future
+ * programmatic creation path) reuse the same worktree/OpenCode/
+ * ClaudeCodeSession/booking logic rather than duplicating ~80 lines of
+ * backend-specific setup. Does NOT do input validation (callers validate
+ * before calling) so the function signature stays clean: every field is
+ * required and pre-validated.
+ *
+ * workspaceDir is the REAL (user-facing) workspace — the function handles
+ * worktree isolation internally, setting actualCwd/isolated/worktreeBranch
+ * on the persona for any git repo automatically, same as the original handler.
+ */
+async function createPersonaFromRecipe({ backend, providerID, modelID, permissionMode, effortLevel, workspaceDir, name }) {
+  let persona;
+  if (backend === "api") {
+    let actualCwd = workspaceDir;
+    let isolated = false;
+    let worktreeBranch = null;
+    if (isGitRepo(workspaceDir)) {
+      const wt = createIsolatedWorktree(workspaceDir, name, randomUUID());
+      actualCwd = wt.worktreePath;
+      isolated = true;
+      worktreeBranch = wt.branch;
+    }
+
+    const entry = pool.getOrCreate(actualCwd);
+    await entry.ready;
+    const session = await entry.client.session.create({ body: { title: name } });
+    const id = session.data.id;
+    persona = {
+      id, name, backend, providerID, modelID, workspaceDir, actualCwd, isolated, worktreeBranch,
+      sessionID: id,
+      opencodeEntry: null,
+      lastActivityTs: Date.now(),
+      messages: [],
+      summary: null,
+      lastDenials: [],
+      pendingPermission: null,
+      pendingQuestion: null,
+      pendingTurn: null,
+      turnFinishedUnseen: false,
+      backgroundTask: null,
+    };
+    await connectApiPersona(persona, entry);
+  } else {
+    const id = randomUUID();
+
+    let actualCwd = workspaceDir;
+    let isolated = false;
+    let worktreeBranch = null;
+    if (isGitRepo(workspaceDir)) {
+      const wt = createIsolatedWorktree(workspaceDir, name, id);
+      actualCwd = wt.worktreePath;
+      isolated = true;
+      worktreeBranch = wt.branch;
+    }
+
+    const claudeSession = new ClaudeCodeSession(id, modelID, name, actualCwd, false, permissionMode || null, effortLevel || null);
+    persona = {
+      id, name, backend, modelID, workspaceDir, actualCwd, isolated, worktreeBranch,
+      permissionMode: permissionMode || null,
+      effortLevel: effortLevel || null,
+      claudeSession,
+      lastActivityTs: Date.now(),
+      messages: [],
+      summary: null,
+      lastDenials: [],
+      pendingTurn: null,
+      backgroundTask: null,
+      turnFinishedUnseen: false,
+    };
+    wireBackgroundEvents(persona);
+  }
+
+  personas.set(persona.id, persona);
+  persistAll();
+
+  // Same lastRecipe update as the original POST handler — the next New Agent
+  // modal open remembers this recipe regardless of whether it came from the
+  // modal itself or a quick-agent launch (the last thing Brian created).
+  lastRecipe = { backend, providerID: providerID ?? null, modelID, permissionMode: permissionMode ?? null, effortLevel: effortLevel ?? null };
+  settings.lastRecipe = lastRecipe;
+  saveSettings(settings);
+
+  return persona;
+}
+
 const app = express();
 // Default 100kb is enough for plain-text turns but not a turn carrying a
 // couple of image/PDF attachments - 25mb covers a handful of typical
@@ -724,95 +812,91 @@ app.post("/api/personas", async (req, res) => {
     if (!fs.statSync(workspaceDir).isDirectory()) {
       return res.status(400).json({ error: `workspaceDir is not a directory: ${workspaceDir}` });
     }
-
-    let persona;
-    if (backend === "api") {
-      if (!providerID) return res.status(400).json({ error: "providerID is required for backend=api" });
-
-      // Concurrent-session git safety (Brian's standing rule), same as the
-      // claude-code branch below: an OpenCode persona running bash/git in a
-      // shared checkout can collide with Brian's own terminal sessions or
-      // other personas on the same repo otherwise. The id passed here is
-      // just a throwaway label for worktree/branch naming - the persona's
-      // real id comes from OpenCode's own session.create() response below.
-      let actualCwd = workspaceDir;
-      let isolated = false;
-      let worktreeBranch = null;
-      if (isGitRepo(workspaceDir)) {
-        const wt = createIsolatedWorktree(workspaceDir, name, randomUUID());
-        actualCwd = wt.worktreePath;
-        isolated = true;
-        worktreeBranch = wt.branch;
-      }
-
-      const entry = pool.getOrCreate(actualCwd);
-      await entry.ready;
-      const session = await entry.client.session.create({ body: { title: name } });
-      const id = session.data.id;
-      persona = {
-        id, name, backend, providerID, modelID, workspaceDir, actualCwd, isolated, worktreeBranch,
-        sessionID: id,
-        opencodeEntry: null,
-        lastActivityTs: Date.now(),
-        messages: [],
-        summary: null,
-        lastDenials: [],
-        pendingPermission: null,
-        pendingQuestion: null,
-        pendingTurn: null,
-        turnFinishedUnseen: false,
-        // OpenCode has no run_in_background primitive today (confirmed -
-        // its only detached-dispatch shape is "subtask", which PR31 already
-        // renders within an active prompt's own event stream) - stays null
-        // forever on this backend, never wired to a background-event source.
-        backgroundTask: null,
-      };
-      await connectApiPersona(persona, entry);
-    } else {
-      const id = randomUUID();
-
-      // Concurrent-session git safety (Brian's standing rule): a claude-code
-      // persona operating in a git repo runs in a dedicated worktree, never
-      // the shared checkout directly - it could collide with Brian's own
-      // terminal sessions or other personas on the same repo otherwise.
-      let actualCwd = workspaceDir;
-      let isolated = false;
-      let worktreeBranch = null;
-      if (isGitRepo(workspaceDir)) {
-        const wt = createIsolatedWorktree(workspaceDir, name, id);
-        actualCwd = wt.worktreePath;
-        isolated = true;
-        worktreeBranch = wt.branch;
-      }
-
-      const claudeSession = new ClaudeCodeSession(id, modelID, name, actualCwd, false, permissionMode || null, effortLevel || null);
-      persona = {
-        id, name, backend, modelID, workspaceDir, actualCwd, isolated, worktreeBranch,
-        permissionMode: permissionMode || null,
-        effortLevel: effortLevel || null,
-        claudeSession,
-        lastActivityTs: Date.now(),
-        messages: [],
-        summary: null,
-        lastDenials: [],
-        pendingTurn: null,
-        backgroundTask: null,
-        turnFinishedUnseen: false,
-      };
-      wireBackgroundEvents(persona);
+    if (backend === "api" && !providerID) {
+      return res.status(400).json({ error: "providerID is required for backend=api" });
     }
 
-    personas.set(persona.id, persona);
-    persistAll();
+    const persona = await createPersonaFromRecipe({ backend, providerID, modelID, permissionMode, effortLevel, workspaceDir, name });
+    res.status(201).json(personaSummary(persona));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: String(err) });
+  }
+});
 
-    // Remember this recipe as the New Agent modal's next default (workspace
-    // deliberately excluded - each new agent is typically for a different
-    // repo, so carrying it forward would be a wrong-more-often-than-right
-    // default rather than a helpful one).
-    lastRecipe = { backend, providerID: providerID ?? null, modelID, permissionMode: permissionMode ?? null, effortLevel: effortLevel ?? null };
-    settings.lastRecipe = lastRecipe;
-    saveSettings(settings);
+/* ── Quick Agents (one-click chip presets) ── */
 
+app.get("/api/quick-agents", (req, res) => {
+  const s = loadSettings();
+  res.json(s.quickAgents ?? []);
+});
+
+app.post("/api/quick-agents", (req, res) => {
+  const { label, backend, providerID, modelID, permissionMode, effortLevel } = req.body ?? {};
+  if (!label?.trim()) return res.status(400).json({ error: "label is required" });
+  if (!backend || (backend !== "api" && backend !== "claude-code")) {
+    return res.status(400).json({ error: 'backend must be "api" or "claude-code"' });
+  }
+  if (!modelID) return res.status(400).json({ error: "modelID is required" });
+  if (backend === "api" && !providerID) {
+    return res.status(400).json({ error: "providerID is required for backend=api" });
+  }
+  if (permissionMode && !CLAUDE_PERMISSION_MODES.some((m) => m.value === permissionMode)) {
+    return res.status(400).json({ error: `unrecognized permissionMode: ${permissionMode}` });
+  }
+  if (effortLevel && !CLAUDE_EFFORT_LEVELS.some((m) => m.value === effortLevel)) {
+    return res.status(400).json({ error: `unrecognized effortLevel: ${effortLevel}` });
+  }
+
+  const s = loadSettings();
+  const qa = { id: randomUUID(), label: label.trim(), backend, providerID: providerID ?? null, modelID, permissionMode: permissionMode ?? null, effortLevel: effortLevel ?? null };
+  s.quickAgents = [...(s.quickAgents ?? []), qa];
+  saveSettings(s);
+  res.status(201).json(qa);
+});
+
+app.patch("/api/quick-agents/:id", (req, res) => {
+  const { label } = req.body ?? {};
+  if (!label?.trim()) return res.status(400).json({ error: "label is required" });
+
+  const s = loadSettings();
+  const idx = (s.quickAgents ?? []).findIndex((a) => a.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: "quick agent not found" });
+
+  s.quickAgents[idx] = { ...s.quickAgents[idx], label: label.trim() };
+  saveSettings(s);
+  res.json(s.quickAgents[idx]);
+});
+
+app.delete("/api/quick-agents/:id", (req, res) => {
+  const s = loadSettings();
+  const idx = (s.quickAgents ?? []).findIndex((a) => a.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: "quick agent not found" });
+
+  s.quickAgents.splice(idx, 1);
+  saveSettings(s);
+  res.status(204).end();
+});
+
+app.post("/api/quick-agents/:id/launch", async (req, res) => {
+  try {
+    const s = loadSettings();
+    const qa = (s.quickAgents ?? []).find((a) => a.id === req.params.id);
+    if (!qa) return res.status(404).json({ error: "quick agent not found" });
+
+    const name = randomStarName([...personas.values()].map((p) => p.name));
+    const persona = await createPersonaFromRecipe({
+      backend: qa.backend,
+      providerID: qa.providerID,
+      modelID: qa.modelID,
+      permissionMode: qa.permissionMode,
+      effortLevel: qa.effortLevel,
+      // Quick agents carry a model recipe, not a workspace — same reasoning
+      // PR43 used to exclude workspace from lastRecipe: Brian launches quick
+      // agents from any context, so DEFAULT_WORKSPACE is the right default.
+      workspaceDir: DEFAULT_WORKSPACE,
+      name,
+    });
     res.status(201).json(personaSummary(persona));
   } catch (err) {
     console.error(err);

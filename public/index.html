@@ -19,6 +19,7 @@
         <button type="button" id="triage-btn" class="sidebar-action" title="Open decision queue triage">📋 Decision Queue</button>
       </div>
       <div id="triage-summary" class="triage-summary" hidden></div>
+      <div id="quick-agents-row" class="quick-agents-row"></div>
       <ul id="persona-list"></ul>
     </aside>
     <main class="chat">
@@ -74,6 +75,7 @@
       <select id="new-agent-effort-mode" hidden></select>
       <div class="modal-actions">
         <button type="button" id="new-agent-cancel">Cancel</button>
+        <button type="button" id="new-agent-save-quick">☆ Save as quick agent</button>
         <button type="button" id="new-agent-create">Create</button>
       </div>
     </div>
@@ -103,6 +105,16 @@
       <div class="modal-actions">
         <button type="button" id="dir-browser-cancel">Cancel</button>
         <button type="button" id="dir-browser-select">Select this folder</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="manage-quick-agents-modal" hidden>
+    <div class="modal">
+      <h3>Manage Quick Agents</h3>
+      <div id="manage-quick-agents-list"></div>
+      <div class="modal-actions">
+        <button type="button" id="manage-quick-agents-close">Close</button>
       </div>
     </div>
   </div>
