@@ -164,9 +164,23 @@ export class OpenCodeServerPool {
     );
 
     return new Promise((resolveReady, rejectReady) => {
+      // Node's child_process docs: if spawn() itself fails (binary missing,
+      // ENOENT, EACCES, etc.), the child emits an 'error' event. Without a
+      // listener, Node treats it as an uncaught exception and crashes the
+      // entire server process - killing every persona/session, not just this
+      // one pool entry. Reject the readiness promise instead so callers see
+      // a normal failure scoped to this one workspace/session.
+      proc.on("error", (err) => {
+        clearTimeout(readyTimeout);
+        this.byDirectory.delete(directory);
+        rejectReady(new Error(`opencode serve failed to spawn for ${directory}: ${err.message}`));
+      });
+
       // Fail loud and fast on a bind/spawn failure (e.g. stale process still
-      // holding the port) instead of hanging forever with no error - a silent
-      // infinite hang is worse than a swallow, since nothing even reports it.
+      // holding the port, or a separate error path where the process started
+      // but became unusable) instead of hanging forever with no error - a
+      // silent infinite hang is worse than a swallow, since nothing even
+      // reports it.
       const readyTimeout = setTimeout(() => {
         this.byDirectory.delete(directory); // don't cache a dead-end entry - let the next call retry on a fresh port
         proc.kill();
