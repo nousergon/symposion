@@ -24,16 +24,34 @@ const CONTEXT_FILE_CANDIDATES = ["AGENTS.md", "CLAUDE.md"];
 /** @type {Map<string, {mtimeMs: number, content: string}>} */
 const contextCache = new Map();
 
-/** Read one file through the (path, mtime) cache. @returns {string|null} */
+/**
+ * Read one instruction file through the (path, mtime) cache.
+ *
+ * `cwd` reaches this module from `POST /api/personas` (`workspaceDir`), so the
+ * path is user-influenced. The walk only ever targets a file named exactly
+ * AGENTS.md or CLAUDE.md, but that constraint used to be implicit in the call
+ * site — CodeQL flagged the reads as path injection once this was extracted
+ * into its own function, and it was right to: the guarantee lived in the
+ * caller, not in the code doing the read.
+ *
+ * Now enforced here. The basename must be one of the known candidates, so a
+ * traversal component in `cwd` cannot steer the read at a file of the
+ * attacker's choosing — the worst case is reading an AGENTS.md somewhere
+ * unintended, which is the same class of thing the walk does by design.
+ *
+ * @returns {string|null}
+ */
 function readCached(candidate) {
+  const resolved = path.resolve(candidate);
+  if (!CONTEXT_FILE_CANDIDATES.includes(path.basename(resolved))) return null;
   try {
-    const stat = fs.statSync(candidate);                 // throws if missing
-    const cached = contextCache.get(candidate);
+    const stat = fs.statSync(resolved);                  // throws if missing
+    const cached = contextCache.get(resolved);
     const mtimeMs = stat.mtimeMs;
     if (cached && cached.mtimeMs === mtimeMs) return cached.content;
 
-    const content = fs.readFileSync(candidate, "utf-8");
-    contextCache.set(candidate, { mtimeMs, content });
+    const content = fs.readFileSync(resolved, "utf-8");
+    contextCache.set(resolved, { mtimeMs, content });
     return content;
   } catch {
     return null;                                         // ENOENT / EACCES

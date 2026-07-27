@@ -211,3 +211,15 @@ test("a directory holding both filenames contributes once", () => {
   const result = loadRepoContext(root);
   assert.equal(result.split("# canonical").length - 1, 1);
 });
+
+test("a path whose basename is not an instruction file is refused", () => {
+  // Guards the CodeQL path-injection finding: cwd is user-influenced via
+  // POST /api/personas (workspaceDir), so the read must be constrained here
+  // rather than relying on the caller to only ever pass known names.
+  const root = tmpdir();
+  fs.writeFileSync(path.join(root, "secrets.env"), "KEY=value");
+  fs.writeFileSync(path.join(root, "AGENTS.md"), "# real");
+  const result = loadRepoContext(root);
+  assert.ok(result.includes("# real"));
+  assert.ok(!result.includes("KEY=value"));
+});
