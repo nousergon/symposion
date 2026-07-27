@@ -25,25 +25,28 @@ const CONTEXT_FILE_CANDIDATES = ["AGENTS.md", "CLAUDE.md"];
 const contextCache = new Map();
 
 /**
- * Read one instruction file through the (path, mtime) cache.
+ * Read one instruction file from `dir` through the (path, mtime) cache.
  *
- * `cwd` reaches this module from `POST /api/personas` (`workspaceDir`), so the
- * path is user-influenced. The walk only ever targets a file named exactly
- * AGENTS.md or CLAUDE.md, but that constraint used to be implicit in the call
- * site — CodeQL flagged the reads as path injection once this was extracted
- * into its own function, and it was right to: the guarantee lived in the
- * caller, not in the code doing the read.
+ * `dir` is user-influenced: `cwd` reaches this module from
+ * `POST /api/personas` (`workspaceDir`). The FILENAME is not — `nameIndex`
+ * selects from the module-level literal list, so the read target is
+ * `<some directory>/AGENTS.md` or `<some directory>/CLAUDE.md` and can never
+ * be steered at a file of the caller's choosing.
  *
- * Now enforced here. The basename must be one of the known candidates, so a
- * traversal component in `cwd` cannot steer the read at a file of the
- * attacker's choosing — the worst case is reading an AGENTS.md somewhere
- * unintended, which is the same class of thing the walk does by design.
+ * Taking an index rather than a joined path is deliberate. An earlier version
+ * accepted the full path and validated its basename afterwards; CodeQL
+ * correctly kept flagging that as path injection, because a check performed
+ * after the string is built is a check that can be bypassed by construction.
+ * Building the path here from a literal removes the taint at the source
+ * instead of asserting it away.
  *
+ * @param {string} dir
+ * @param {number} nameIndex - index into CONTEXT_FILE_CANDIDATES
  * @returns {string|null}
  */
-function readCached(candidate) {
-  const resolved = path.resolve(candidate);
-  if (!CONTEXT_FILE_CANDIDATES.includes(path.basename(resolved))) return null;
+function readCached(dir, nameIndex) {
+  const name = nameIndex === 0 ? "AGENTS.md" : "CLAUDE.md";
+  const resolved = path.join(path.resolve(dir), name);
   try {
     const stat = fs.statSync(resolved);                  // throws if missing
     const cached = contextCache.get(resolved);
@@ -69,11 +72,10 @@ export function loadRepoContext(cwd) {
   let dir = cwd;
 
   for (let i = 0; i < MAX_CONTEXT_WALK_DEPTH; i++) {
-    for (const name of CONTEXT_FILE_CANDIDATES) {
-      const candidate = path.join(dir, name);
-      const content = readCached(candidate);
+    for (let n = 0; n < CONTEXT_FILE_CANDIDATES.length; n++) {
+      const content = readCached(dir, n);
       if (content !== null) {
-        sections.push([candidate, content]);
+        sections.push([path.join(dir, CONTEXT_FILE_CANDIDATES[n]), content]);
         break;   // one file per directory — CLAUDE.md is usually a symlink
       }
     }
