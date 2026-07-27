@@ -20,6 +20,7 @@
     "@opencode-ai/sdk": "^1.18.4",
     "dompurify": "^3.4.12",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.6.1",
     "marked": "^18.0.7",
     "opencode-ai": "^1.18.4",
     "qrcode": "^1.5.4",
