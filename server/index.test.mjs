@@ -170,3 +170,44 @@ test("capped walk depth — does not go beyond MAX_CONTEXT_WALK_DEPTH", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+// ── concatenation contract (mirrors nousergon-lib's test_context.py) ────────
+// The Python and JS loaders are a contract PAIR. Before this, both returned
+// the first file found and stopped, so a repo-level AGENTS.md hid the
+// fleet-level one from every api-backend persona.
+
+test("all levels are concatenated, not replaced", () => {
+  const root = tmpdir();
+  fs.writeFileSync(path.join(root, "AGENTS.md"), "# root");
+  const sub = path.join(root, "project");
+  fs.mkdirSync(sub);
+  fs.writeFileSync(path.join(sub, "AGENTS.md"), "# project-specific");
+  const result = loadRepoContext(sub);
+  assert.ok(result.includes("project-specific"));
+  assert.ok(result.includes("# root"), "the fleet-level file must not be hidden");
+});
+
+test("root comes first so specific instructions win", () => {
+  const root = tmpdir();
+  fs.writeFileSync(path.join(root, "AGENTS.md"), "# root");
+  const sub = path.join(root, "project");
+  fs.mkdirSync(sub);
+  fs.writeFileSync(path.join(sub, "AGENTS.md"), "# project-specific");
+  const result = loadRepoContext(sub);
+  assert.ok(result.indexOf("# root") < result.indexOf("# project-specific"));
+});
+
+test("a single file is returned bare", () => {
+  const root = tmpdir();
+  fs.writeFileSync(path.join(root, "AGENTS.md"), "# only");
+  assert.equal(loadRepoContext(root), "# only");
+});
+
+test("a directory holding both filenames contributes once", () => {
+  const root = tmpdir();
+  fs.writeFileSync(path.join(root, "AGENTS.md"), "# canonical");
+  fs.writeFileSync(path.join(root, "CLAUDE.md"), "# canonical");
+  const result = loadRepoContext(root);
+  assert.equal(result.split("# canonical").length - 1, 1);
+});
