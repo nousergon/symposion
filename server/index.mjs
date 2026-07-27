@@ -15,50 +15,42 @@ import { createPresenceTracker } from "./presence.mjs";
 import { isGitRepo, createIsolatedWorktree, removeWorktreeAndBranch } from "./worktree.mjs";
 import { randomStarName } from "./star-names.mjs";
 import { SseHub } from "./sse-hub.mjs";
-import { resolveSecret } from "./secrets.mjs";
-import { ensureEgressProxy } from "./llm-egress-proxy.mjs";
 import { fetchQueue, itemToQuestion, postComment, removeLabels, addLabels, closeIssue, markPrReadyForReview } from "./decision-queue.mjs";
 
 import { loadRepoContext } from "./repo-context.mjs";
+import { migratePersonas, LITELLM_PROVIDER_ID } from "./persona-migration.mjs";
 
 const hub = new SseHub();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEV_ROOT = path.join(os.homedir(), "Development");
 
-// Every direct-API provider (i.e. every OpenCode provider that isn't the
-// free OpenCode Zen proxy) gets its own local content-scanning egress proxy
-// instance (llm-egress-proxy.mjs / ~/Development/.llm-routing/llm_egress_
-// proxy.py) instead of talking to the real upstream directly. Ports are
-// assigned here and must stay stable across restarts (OpenCode's own
-// provider config, ~/.config/opencode/opencode.jsonc, machine-local, points
-// each provider's baseURL at the matching port with a placeholder apiKey -
-// see llm-egress-proxy.mjs's module doc). deepseek=8972 predates this map
-// (symposion#6); xai=8973 added 2026-07-19 when a real xAI account was
-// wired up the same way, generalizing what used to be a DeepSeek-only path;
-// gemini=8974 added 2026-07-23 for Gemini models via Google's OpenAI-
-// compatible endpoint (generativelanguage.googleapis.com/v1beta/openai).
-const EGRESS_PROXY_PROVIDERS = {
-  deepseek: { port: 8972, upstreamHost: "api.deepseek.com", apiKeyEnv: "DEEPSEEK_API_KEY", upstreamPrefix: "" },
-  xai: { port: 8973, upstreamHost: "api.x.ai", apiKeyEnv: "XAI_API_KEY", upstreamPrefix: "" },
-  gemini: { port: 8974, upstreamHost: "generativelanguage.googleapis.com", apiKeyEnv: "GEMINI_API_KEY", upstreamPrefix: "/v1beta/openai" },
-};
-
-// Resolved once at startup (env override, else SSM /symposion/{KEY}) and
-// handed ONLY to the corresponding local egress proxy process, never to
-// symposion's own process.env or an `opencode serve` child's env - the
-// real key never reaches an unscanned outbound request (symposion#6,
-// generalized to non-DeepSeek providers 2026-07-19). Missing key, or the
-// proxy failing to come up, just means that provider silently doesn't
-// work - not startup-fatal, since the free opencode-zen proxy still works
-// either way.
-const providerKeys = {};
-for (const [providerId, cfg] of Object.entries(EGRESS_PROXY_PROVIDERS)) {
-  const key = await resolveSecret(cfg.apiKeyEnv);
-  providerKeys[providerId] = key;
-  if (key) await ensureEgressProxy({ providerId, apiKey: key, ...cfg });
-  else console.warn(`[secrets] ${cfg.apiKeyEnv} not found (env or SSM) - real ${providerId} account provider will not be available`);
-}
+// ── Provider plumbing: ONE upstream, the LiteLLM router ────────────────
+//
+// Symposion no longer manages per-provider egress proxies. Every api-backend
+// persona talks to the LiteLLM router on 127.0.0.1:8980, which owns model
+// selection, fallback chains with cooldown, wire-format translation, and
+// routing through the multi-tenant DLP egress proxy on :8990.
+//
+// WHY THIS CHANGED (2026-07-27). Symposion used to spawn one egress proxy
+// per provider on ports 8972/8973/8974 and keep its own provider->port map.
+// That was a parallel copy of routing facts the registry already owns, and
+// it broke exactly the way a parallel copy does: when the fleet consolidated
+// onto the single multi-tenant proxy (:8990), those three per-provider
+// instances were retired and symposion was never migrated. All three ports
+// were dead and EVERY api-backend persona was broken, silently.
+//
+// The registry is now the only place a model, endpoint or fallback order is
+// declared; krepis resolves it; LiteLLM serves it; symposion applies the
+// answer verbatim. See nous-ergon-ops/policies/model-router-policy.md
+// (layer 5: "consumers apply the contract verbatim; they MUST NOT hold a
+// routing table, a model slug, or an endpoint of their own") and
+// model-portability-policy.md I2/I3.
+//
+// OpenCode reaches the router through a single `litellm` provider entry in
+// ~/.config/opencode/opencode.jsonc (machine-local), whose models are the
+// capability-class names below. Provider API keys are no longer symposion's
+// concern at all — they live in the egress proxy, one hop further out.
 
 const pool = new OpenCodeServerPool();
 
@@ -72,56 +64,62 @@ const pool = new OpenCodeServerPool();
 // Resets on every message, like the real thing would. See symposion#5.
 const TTL_WINDOW_MS = 60 * 60 * 1000; // 60 min
 
-// Brian's chosen defaults (2026-07-14): Sonnet 5 for claude-code-backed
-// personas, DeepSeek for API-backed (OpenCode) personas - the real DeepSeek
-// account (provider "deepseek"), not OpenCode Zen's free proxy (provider
-// "opencode"), now that a real key is wired up (symposion#6).
+// Brian's chosen defaults: Sonnet 5 for claude-code-backed personas; the
+// `med` capability class for API-backed (OpenCode) personas. `med` rather
+// than a concrete model, so the default follows the registry instead of
+// pinning symposion to whatever DeepSeek model happened to be current when
+// this line was written (it said "deepseek-chat", a model the registry
+// stopped referencing some time ago).
 const CLAUDE_CODE_DEFAULT = { modelID: "claude-sonnet-5" };
-const API_DEFAULT = { providerID: "deepseek", modelID: "deepseek-chat" };
+const API_DEFAULT = { providerID: LITELLM_PROVIDER_ID, modelID: "med" };
 // ~/Development itself, not a specific repo under it - most new personas
 // aren't working on symposion, and the old default silently pointed every
 // unconfigured persona at symposion's own working tree.
 const DEFAULT_WORKSPACE = DEV_ROOT;
 
 // ── Model-group resolution via krepis router ──────────────────────────
-// Group definitions live in krepis (krepis/src/krepis/router.py —
-// _builtin_model_list / LLM_MODEL_REGISTRY.yaml). Symposion calls
-// `python3 -m krepis.router resolve <group>` to get the current model
-// for a tier, then translates the krepis model name into Symposion's
-// (providerID, modelID) vocabulary via the bridge below.
+//
+// A capability class (low/med/high/ultra) IS the model id we hand OpenCode:
+// the `litellm` provider exposes exactly those four, and the router decides
+// which concrete model serves each one. There is deliberately no name
+// translation here any more.
+//
+// The old code kept a hand-maintained KREPIS_BRIDGE mapping krepis model
+// names to symposion's (providerID, modelID) space. It had four entries
+// against a registry of twenty-plus, so it was permanently incomplete: two
+// of its entries pointed at Gemini models the registry marks `deprecated`
+// (404 / quota-exhausted), and `ultra` resolved to a model with no bridge
+// entry at all, which made symposion's top tier silently unavailable.
+// Deleting it removes the whole class — a consumer that translates model
+// names is a consumer holding routing facts (model-router-policy layer 5).
+//
+// `resolve --json` still runs, but only to report which concrete model
+// currently backs each class. That is DISPLAY metadata: if it fails, the
+// group is still perfectly usable, because the router — not this process —
+// does the resolving at request time.
 
 const KREPIS_DIR = path.join(os.homedir(), "Development", "krepis");
 const KREPIS_PYTHON = path.join(KREPIS_DIR, ".venv", "bin", "python3");
 
-// The fleet's four model tiers. These keys are a stable convention, not
-// group definitions — which model each key resolves to is owned by krepis.
+// The fleet's four capability classes. Stable convention; which model each
+// resolves to is owned by the registry and served by the router.
 const MODEL_GROUP_KEYS = ["low", "med", "high", "ultra"];
-
-// Translates krepis model names (the upstream model identifiers returned
-// by `python3 -m krepis.router resolve`) into Symposion's provider/model
-// space. One entry per model that appears in krepis groups. This is a
-// namespace bridge, NOT group definitions — groups are resolved by krepis.
-const KREPIS_BRIDGE = {
-  "deepseek-v4-flash":  { providerID: "deepseek", modelID: "deepseek-chat" },
-  "deepseek-v4-pro":    { providerID: "deepseek", modelID: "deepseek-reasoner" },
-  "gemini-2.5-flash":   { providerID: "gemini",  modelID: "gemini-2.0-flash" },
-  "gemini-2.5-pro":     { providerID: "gemini",  modelID: "gemini-2.5-pro-exp-03-25" },
-};
-// OpenRouter models are intentionally absent — Symposion has no OpenRouter
-// provider. When krepis resolves a group to an OpenRouter model (e.g.
-// ultra → moonshotai/kimi-k3), the bridge returns null and the group is
-// unavailable until litellm cooldown shifts it to an egress-proxy fallback.
 
 let cachedModelGroups = null; // resolved once at startup, re-resolved on restart
 
-function krepisResolve(group) {
-  return new Promise((resolve, reject) => {
-    execFile(KREPIS_PYTHON, ["-m", "krepis.router", "resolve", group], {
+/** Ask krepis which concrete model currently backs `group` (display only). */
+function krepisResolveJson(group) {
+  return new Promise((resolve) => {
+    execFile(KREPIS_PYTHON, ["-m", "krepis.router", "resolve", group, "--json"], {
       cwd: KREPIS_DIR,
       timeout: 15000,
-    }, (err, stdout, stderr) => {
-      if (err) return reject(new Error(`krepis resolve ${group} failed: ${stderr || err.message}`));
-      resolve(stdout.trim());
+    }, (err, stdout) => {
+      if (err) return resolve(null); // display metadata only — never fatal
+      try {
+        resolve(JSON.parse(stdout.trim()));
+      } catch {
+        resolve(null);
+      }
     });
   });
 }
@@ -130,17 +128,20 @@ async function resolveModelGroups() {
   if (cachedModelGroups) return cachedModelGroups;
   const resolved = [];
   for (const key of MODEL_GROUP_KEYS) {
-    try {
-      const model = await krepisResolve(key);
-      const bridge = KREPIS_BRIDGE[model];
-      if (bridge) {
-        resolved.push({ key, ...bridge, resolvedModel: model });
-      } else {
-        console.warn(`[model-groups] ${key} → "${model}" has no Symposion bridge entry (OpenRouter / unknown provider) — group unavailable`);
-      }
-    } catch (err) {
-      console.error(`[model-groups] failed to resolve ${key}:`, err.message);
+    // Every class is available unconditionally: the router owns selection
+    // and fallback, so symposion cannot make a class "unavailable" by
+    // failing to look something up.
+    const info = await krepisResolveJson(key);
+    if (!info) {
+      console.warn(`[model-groups] ${key}: could not read which model backs it — class still usable via the router`);
     }
+    resolved.push({
+      key,
+      providerID: LITELLM_PROVIDER_ID,
+      modelID: key,
+      // What the router says is serving this class right now, for the UI.
+      resolvedModel: info?.primary_model ?? info?.model ?? null,
+    });
   }
   cachedModelGroups = resolved;
   return resolved;
@@ -201,7 +202,11 @@ async function notifyTurnFinished(persona, replyText) {
   }));
 }
 
-for (const record of loadPersonas()) {
+// Personas persisted before the LiteLLM cutover carry a retired providerID
+// whose OpenCode baseURL points at an egress-proxy port that no longer
+// exists — see persona-migration.mjs for the full rationale.
+const { records: _personaRecords, migrated: _migratedCount } = migratePersonas(loadPersonas());
+for (const record of _personaRecords) {
   personas.set(record.id, {
     ...record,
     claudeSession: null,
@@ -214,6 +219,12 @@ for (const record of loadPersonas()) {
   });
 }
 console.log(`[store] loaded ${personas.size} persona(s) from disk`);
+if (_migratedCount > 0) {
+  // Persist immediately so the migration is durable rather than re-derived
+  // on every boot (and so a later partial write can't resurrect dead ports).
+  savePersonas([...personas.values()].map(toRecord));
+  console.log(`[migrate] rewrote ${_migratedCount} persona(s) onto the LiteLLM router and persisted`);
+}
 
 // Persisted server-side (not localStorage) so the "last recipe" default
 // survives a browser cache clear and is consistent across any device that
@@ -309,19 +320,16 @@ async function ensureConnected(persona) {
     persona.claudeSession = new ClaudeCodeSession(persona.id, persona.modelID, persona.name, persona.actualCwd, resuming, persona.permissionMode, persona.effortLevel);
     wireBackgroundEvents(persona);
   } else {
-    // Runs on every call, not just first-connect: an egress proxy is a
-    // separate process from the opencode pool entry below, so it can die
-    // independently AFTER a persona is already connected (verified live,
-    // symposion#24 - a manually-killed proxy left every subsequent message
-    // to a "deepseek"-provider persona hanging forever with no error
-    // surfaced, since ensureEgressProxy() previously only ran once at
-    // server startup). ensureEgressProxy() itself is a cheap
-    // health-check-first, spawn-if-not-running call - negligible cost when
-    // the proxy's already healthy, the common case.
-    const egressProxyCfg = EGRESS_PROXY_PROVIDERS[persona.providerID];
-    if (egressProxyCfg && providerKeys[persona.providerID]) {
-      await ensureEgressProxy({ providerId: persona.providerID, apiKey: providerKeys[persona.providerID], ...egressProxyCfg });
-    }
+    // Symposion no longer spawns or health-checks egress proxies here.
+    // The LiteLLM router and the multi-tenant DLP proxy are launchd-
+    // supervised services with KeepAlive; babysitting them from an app
+    // process was the wrong layer, and the per-provider instances this
+    // used to manage no longer exist.
+    //
+    // The concern that motivated the old per-call check (symposion#24 — a
+    // dead proxy left messages hanging forever with no error surfaced) is
+    // real and NOT solved by deleting this: it is now the router's job to
+    // fail loudly. Tracked separately rather than papered over here.
     if (persona.opencodeEntry) return;
     // Reconnect to the SAME worktree/cwd used originally, same as claude-code
     // above - actualCwd falls back to workspaceDir for personas predating
