@@ -18,6 +18,7 @@ import { SseHub } from "./sse-hub.mjs";
 import { fetchQueue, itemToQuestion, postComment, removeLabels, addLabels, closeIssue, markPrReadyForReview } from "./decision-queue.mjs";
 
 import { loadRepoContext } from "./repo-context.mjs";
+import rateLimit from "express-rate-limit";
 import { migratePersonas, LITELLM_PROVIDER_ID } from "./persona-migration.mjs";
 
 const hub = new SseHub();
@@ -741,6 +742,46 @@ const app = express();
 // attachments per message without accepting arbitrarily large uploads.
 app.use(express.json({ limit: "25mb" }));
 app.use(express.static(path.join(__dirname, "..", "public")));
+
+// Rate limiting — CodeQL js/missing-rate-limiting (config#2528). Though the
+// server binds only to 127.0.0.1, rate limiting provides defense-in-depth
+// against runaway local processes or compromised tools that share loopback.
+// Limits are generous because the only client is the local machine.
+// express-rate-limit v8 has first-class Express v5 support.
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "rate limit exceeded — try again in a minute" },
+});
+
+// Stricter for endpoints that spawn LLM-backed Claude Code sessions
+// (the server's most expensive operation).
+const messageLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "message rate limit exceeded — slow down" },
+});
+
+const personaCreateLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "persona creation rate limit exceeded" },
+});
+
+// Apply global API limiter — every /api route counts against 200/min.
+// Route-specific limiters below add an additional, stricter cap on top
+// (a messages request must clear both the global and the per-route limiter).
+app.use("/api", apiLimiter);
+// Stricter per-route limiters for endpoints that spawn LLM-backed Claude
+// Code sessions (the server's most expensive operation).
+app.use("/api/personas/:id/messages", messageLimiter);
+app.post("/api/personas", personaCreateLimiter);
 
 /**
  * Lists subdirectories of ?path= (any absolute path, ~ expanded via
