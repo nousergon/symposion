@@ -4,6 +4,8 @@ import assert from "node:assert/strict";
 import {
   migratePersonaToRouter,
   migratePersonas,
+  repairClaudeCodeModel,
+  repairLastRecipe,
   RETIRED_PROVIDER_IDS,
   LITELLM_PROVIDER_ID,
 } from "./persona-migration.mjs";
@@ -119,4 +121,92 @@ test("a second run is idempotent — nothing left to migrate", () => {
   assert.equal(first.migrated, 2);
   const second = migratePersonas(first.records);
   assert.equal(second.migrated, 0);
+});
+
+// ── claude-code personas created with a capability class (symposion-I96) ──
+//
+// The New Agent modal hid its tier dropdown for claude-code but never cleared
+// its value, and the create handler read that value regardless of backend. The
+// resulting personas were persisted with modelID "high" and answered every
+// turn with a 404 rendered as an assistant reply.
+
+const cc = (over = {}) => ({
+  id: "z1",
+  name: "Zibal",
+  backend: "claude-code",
+  modelID: "claude-sonnet-5",
+  workspaceDir: "/tmp/x",
+  ...over,
+});
+
+test("a claude-code persona on a capability class is reset to the concrete default", () => {
+  const out = repairClaudeCodeModel(cc({ modelID: "high", modelGroup: "high" }), "claude-opus-5");
+  assert.equal(out.modelID, "claude-opus-5");
+  assert.equal(out.modelGroup, null);
+});
+
+test("every capability class is repaired, not just the one that was hit", () => {
+  for (const group of ["low", "med", "high", "ultra"]) {
+    const out = repairClaudeCodeModel(cc({ modelID: group, modelGroup: group }), "claude-opus-5");
+    assert.equal(out.modelID, "claude-opus-5", `${group} not repaired`);
+  }
+});
+
+test("a claude-code persona on a valid model but carrying a group keeps its model, loses the group", () => {
+  const out = repairClaudeCodeModel(cc({ modelID: "claude-haiku-4-5", modelGroup: "low" }), "claude-opus-5");
+  assert.equal(out.modelID, "claude-haiku-4-5");
+  assert.equal(out.modelGroup, null);
+});
+
+test("a healthy claude-code persona is returned untouched (identity preserved)", () => {
+  const rec = cc();
+  assert.equal(repairClaudeCodeModel(rec, "claude-opus-5"), rec);
+});
+
+test("an api persona is never touched by the claude-code repair — class addressing is correct there", () => {
+  const rec = api({ providerID: LITELLM_PROVIDER_ID, modelID: "high", modelGroup: "high" });
+  assert.equal(repairClaudeCodeModel(rec, "claude-opus-5"), rec);
+});
+
+test("migratePersonas repairs claude-code records alongside the router migration", () => {
+  const { records, migrated } = migratePersonas([
+    cc({ id: "a", modelID: "high", modelGroup: "high" }),
+    cc({ id: "b" }),
+    api({ id: "c", providerID: "xai", modelID: "grok-4" }),
+  ], LITELLM_PROVIDER_ID, "claude-opus-5");
+  assert.equal(migrated, 2);
+  assert.equal(records[0].modelID, "claude-opus-5");
+  assert.equal(records[1].modelID, "claude-sonnet-5");
+  assert.equal(records[2].providerID, LITELLM_PROVIDER_ID);
+});
+
+test("the claude-code repair is idempotent", () => {
+  const first = migratePersonas([cc({ modelID: "high", modelGroup: "high" })], LITELLM_PROVIDER_ID, "claude-opus-5");
+  assert.equal(first.migrated, 1);
+  assert.equal(migratePersonas(first.records, LITELLM_PROVIDER_ID, "claude-opus-5").migrated, 0);
+});
+
+// ── lastRecipe, which is what made this defect self-propagating ─────────
+
+test("a lastRecipe naming a class on claude-code is reset to a concrete model", () => {
+  const out = repairLastRecipe({ backend: "claude-code", providerID: "litellm", modelID: "high", modelGroup: "high" }, "claude-opus-5");
+  assert.equal(out.modelID, "claude-opus-5");
+  assert.equal(out.modelGroup, null);
+  // claude-code personas have no provider at all; one here leaked across from
+  // the api-backend group-resolution path.
+  assert.equal(out.providerID, null);
+});
+
+test("an api lastRecipe on a class is left alone — that is how the router is addressed", () => {
+  const recipe = { backend: "api", providerID: "litellm", modelID: "med", modelGroup: "med" };
+  assert.equal(repairLastRecipe(recipe, "claude-opus-5"), recipe);
+});
+
+test("a healthy claude-code lastRecipe is untouched", () => {
+  const recipe = { backend: "claude-code", providerID: null, modelID: "claude-opus-5", modelGroup: null };
+  assert.equal(repairLastRecipe(recipe, "claude-opus-5"), recipe);
+});
+
+test("a null lastRecipe (fresh install) is a no-op", () => {
+  assert.equal(repairLastRecipe(null, "claude-opus-5"), null);
 });

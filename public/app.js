@@ -1836,7 +1836,15 @@ function populateTierSelect(backend = selectedBackend, preferredGroup = null) {
   const show = backend === "api";
   modalTierLabelEl.hidden = !show;
   modalTierEl.hidden = !show;
-  if (!show) return;
+  // Hiding a <select> does not clear it. Reset the VALUE too, or a tier
+  // picked while the api backend was selected survives the switch to
+  // claude-code and gets sent as that persona's model (symposion-I96).
+  if (!show) {
+    modalTierEl.innerHTML = '<option value="">Pick manually</option>';
+    modalTierEl.value = "";
+    modalModelEl.disabled = false;
+    return;
+  }
   modalTierEl.innerHTML = '<option value="">Pick manually</option>';
   for (const g of modelGroups) {
     const opt = document.createElement("option");
@@ -2080,7 +2088,11 @@ modalCreateEl.addEventListener("click", async () => {
   // generates a random star name of its own when name is omitted.
   const name = modalNameEl.value.trim();
   const workspaceDir = modalWorkspaceEl.value;
-  const tier = modalTierEl.value || undefined;
+  // Tiers are api-backend only. Reading the value unconditionally is what let
+  // a hidden tier select decide a claude-code persona's model - and it also
+  // skipped the permission/effort branch below, so those were silently
+  // dropped from every persona created that way (symposion-I96).
+  const tier = (selectedBackend === "api" && modalTierEl.value) || undefined;
 
   const body = { name, backend: selectedBackend, workspaceDir };
   if (tier) {

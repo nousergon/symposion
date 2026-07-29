@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
-import { ClaudeCodeSession, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, CLAUDE_EFFORT_LEVELS, CLAUDE_BIN } from "./claude-code-backend.mjs";
+import { ClaudeCodeSession, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, CLAUDE_EFFORT_LEVELS, CLAUDE_BIN, isValidClaudeModel } from "./claude-code-backend.mjs";
 import { ensureWorkspaceTrusted, startRemoteControl, stopRemoteControl, isProcessAlive, importRemoteTurns } from "./remote-control.mjs";
 import { OpenCodeServerPool } from "./opencode-pool.mjs";
 import { loadPersonas, savePersonas, toRecord, saveAttachment, attachmentFilePath, ATTACHMENTS_DIR, loadSettings, saveSettings, addPushSubscription, getPushSubscriptions, removePushSubscription } from "./store.mjs";
@@ -19,7 +19,7 @@ import { fetchQueue, itemToQuestion, postComment, removeLabels, addLabels, close
 
 import { loadRepoContext } from "./repo-context.mjs";
 import rateLimit from "express-rate-limit";
-import { migratePersonas, LITELLM_PROVIDER_ID } from "./persona-migration.mjs";
+import { migratePersonas, repairLastRecipe, LITELLM_PROVIDER_ID } from "./persona-migration.mjs";
 import { makeRetryGuard, requestFingerprint } from "./retry-guard.mjs";
 
 const hub = new SseHub();
@@ -206,8 +206,10 @@ async function notifyTurnFinished(persona, replyText) {
 
 // Personas persisted before the LiteLLM cutover carry a retired providerID
 // whose OpenCode baseURL points at an egress-proxy port that no longer
-// exists — see persona-migration.mjs for the full rationale.
-const { records: _personaRecords, migrated: _migratedCount } = migratePersonas(loadPersonas());
+// exists; claude-code personas created through the tier-leak defect carry a
+// capability class where the CLI needs a concrete model — see
+// persona-migration.mjs for the full rationale on both.
+const { records: _personaRecords, migrated: _migratedCount } = migratePersonas(loadPersonas(), LITELLM_PROVIDER_ID, CLAUDE_CODE_DEFAULT.modelID);
 for (const record of _personaRecords) {
   personas.set(record.id, {
     ...record,
@@ -234,6 +236,19 @@ if (_migratedCount > 0) {
 // that happened to create the last persona.
 const settings = loadSettings();
 let lastRecipe = settings.lastRecipe ?? null;
+// A lastRecipe carrying a capability class on the claude-code backend prefills
+// the New Agent modal with a model the CLI cannot use, so it re-mints the
+// defect on the next agent created. Repaired and persisted at boot, not just
+// corrected in memory.
+{
+  const repaired = repairLastRecipe(lastRecipe, CLAUDE_CODE_DEFAULT.modelID);
+  if (repaired !== lastRecipe) {
+    console.warn(`[migrate] lastRecipe named an unusable claude-code model (${JSON.stringify(lastRecipe?.modelGroup ?? lastRecipe?.modelID)}) - reset to ${repaired.modelID}`);
+    lastRecipe = repaired;
+    settings.lastRecipe = repaired;
+    saveSettings(settings);
+  }
+}
 
 function normalizePermission(p) {
   return { id: p.id, action: p.permission, resources: p.patterns ?? [], metadata: p.metadata };
@@ -993,6 +1008,14 @@ app.post("/api/personas", async (req, res) => {
     // Resolve modelGroup → concrete providerID/modelID via krepis router.
     // Group wins over any separately provided providerID/modelID.
     if (modelGroup) {
+      // Capability classes are an api-backend concept: the router owns what a
+      // class means. The claude-code backend shells out to `claude -p --model
+      // <id>`, which takes a concrete model and answers an unknown one with a
+      // 404 wearing an assistant message - so resolving a class here would
+      // hand the CLI the literal string "high" (symposion-I96).
+      if (backend === "claude-code") {
+        return res.status(400).json({ error: "modelGroup is api-backend only - claude-code personas take a concrete modelID from GET /api/claude-models" });
+      }
       if (!MODEL_GROUP_KEYS.includes(modelGroup)) {
         return res.status(400).json({ error: `unrecognized modelGroup: ${modelGroup}. Valid: ${MODEL_GROUP_KEYS.join(", ")}` });
       }
@@ -1005,6 +1028,9 @@ app.post("/api/personas", async (req, res) => {
     }
 
     if (!modelID && !modelGroup) return res.status(400).json({ error: "modelID or modelGroup is required" });
+    if (backend === "claude-code" && !isValidClaudeModel(modelID)) {
+      return res.status(400).json({ error: `unrecognized claude-code modelID: ${JSON.stringify(modelID)}. Valid: ${CLAUDE_MODELS.map((m) => m.modelID).join(", ")}` });
+    }
     if (permissionMode && !CLAUDE_PERMISSION_MODES.some((m) => m.value === permissionMode)) {
       return res.status(400).json({ error: `unrecognized permissionMode: ${permissionMode}` });
     }
@@ -1046,6 +1072,11 @@ app.post("/api/quick-agents", (req, res) => {
     return res.status(400).json({ error: 'backend must be "api" or "claude-code"' });
   }
   if (!modelID) return res.status(400).json({ error: "modelID is required" });
+  // A quick agent is a stored recipe replayed on one click - an unusable model
+  // here mints a broken persona every time the chip is pressed.
+  if (backend === "claude-code" && !isValidClaudeModel(modelID)) {
+    return res.status(400).json({ error: `unrecognized claude-code modelID: ${JSON.stringify(modelID)}. Valid: ${CLAUDE_MODELS.map((m) => m.modelID).join(", ")}` });
+  }
   if (backend === "api" && !providerID) {
     return res.status(400).json({ error: "providerID is required for backend=api" });
   }
@@ -1212,6 +1243,11 @@ app.patch("/api/personas/:id", async (req, res) => {
 
   // Resolve modelGroup → concrete providerID/modelID via krepis router.
   if (modelGroup) {
+    // api-backend only, same reason as POST /api/personas above: a class name
+    // reaching `claude -p --model` is a 404 the CLI reports as a reply.
+    if (persona.backend === "claude-code") {
+      return res.status(400).json({ error: "modelGroup is api-backend only - claude-code personas take a concrete modelID from GET /api/claude-models" });
+    }
     if (!MODEL_GROUP_KEYS.includes(modelGroup)) {
       return res.status(400).json({ error: `unrecognized modelGroup: ${modelGroup}. Valid: ${MODEL_GROUP_KEYS.join(", ")}` });
     }
@@ -1225,6 +1261,10 @@ app.patch("/api/personas/:id", async (req, res) => {
   } else if (req.body?.modelID !== undefined) {
     // User sent a specific modelID — clear any previous group.
     persona.modelGroup = null;
+  }
+
+  if (persona.backend === "claude-code" && modelID !== undefined && !isValidClaudeModel(modelID)) {
+    return res.status(400).json({ error: `unrecognized claude-code modelID: ${JSON.stringify(modelID)}. Valid: ${CLAUDE_MODELS.map((m) => m.modelID).join(", ")}` });
   }
 
   const modelChanged = !!modelID && modelID !== persona.modelID;

@@ -44,6 +44,28 @@ export const CLAUDE_MODELS = [
   { modelID: "claude-fable-5", name: "Fable 5" },
 ];
 
+/**
+ * Is `modelID` something `claude -p --model` will actually accept?
+ *
+ * This exists because the CLI does NOT fail fast on an unknown model. It
+ * spawns fine, accepts the turn, and answers with an assistant message
+ * reading "There's an issue with the selected model (X)" carrying a 404
+ * `model_not_found` - i.e. the failure arrives as an ordinary-looking reply
+ * inside the transcript, indistinguishable in the UI from the model
+ * declining to help. Every claude-code persona created with a capability
+ * CLASS as its model ("low"/"med"/"high"/"ultra" - see symposion-I96) failed
+ * exactly this way, and the class name sat in `lastRecipe`, so every
+ * subsequent claude-code agent inherited it.
+ *
+ * The claude-code backend is P1's bounded exception: it shells out to a CLI
+ * that takes a concrete model ID and has no concept of a capability class,
+ * so CLAUDE_MODELS is the whole vocabulary. Anything else is a bug in the
+ * caller, checked at the one chokepoint every spawn path goes through.
+ */
+export function isValidClaudeModel(modelID) {
+  return CLAUDE_MODELS.some((m) => m.modelID === modelID);
+}
+
 // The claude CLI's own --permission-mode choices (verified via `claude
 // --help`), minus "bypassPermissions" - deliberately not offered here since
 // it disables the approval gate entirely (fully autonomous, no denials to
@@ -123,6 +145,13 @@ export class ClaudeCodeSession {
    *   default.
    */
   constructor(sessionId, model, personaName, workspaceDir, resume = false, permissionMode = null, effortLevel = null) {
+    // RAISE rather than spawn a process that will answer every turn with a
+    // 404 dressed as an assistant message - see isValidClaudeModel(). This is
+    // the single chokepoint for every spawn path (create, model switch,
+    // quick-agent, reconnect-after-restart), so no caller can route around it.
+    if (!isValidClaudeModel(model)) {
+      throw new Error(`unusable claude-code model: ${JSON.stringify(model)}. Valid: ${CLAUDE_MODELS.map((m) => m.modelID).join(", ")}`);
+    }
     this.sessionId = sessionId;
     this.model = model;
     this.alive = true;

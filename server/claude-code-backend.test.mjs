@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ClaudeCodeSession } from "./claude-code-backend.mjs";
+import { ClaudeCodeSession, CLAUDE_MODELS, isValidClaudeModel } from "./claude-code-backend.mjs";
 
 // _handleLine is exercised directly against a minimal stand-in for `this`,
 // bypassing the constructor's real `spawn(CLAUDE_BIN, ...)` - the method
@@ -135,4 +135,43 @@ test("scheduledWakeup: a prior wakeup is cleared once a turn completes without r
   s._handleLine(resultLine());
 
   assert.equal(s.scheduledWakeup, null);
+});
+
+// ── model validation (symposion-I96) ───────────────────────────────────
+//
+// The CLI does not reject an unknown --model at spawn: it answers the turn
+// with a 404 (`model_not_found`) wearing an ordinary assistant message, which
+// in the UI is indistinguishable from the model declining to help. So the
+// check has to happen here, before the process exists.
+
+test("isValidClaudeModel accepts every model the UI offers", () => {
+  for (const m of CLAUDE_MODELS) {
+    assert.equal(isValidClaudeModel(m.modelID), true, `${m.modelID} rejected`);
+  }
+});
+
+test("isValidClaudeModel rejects capability classes — the router's vocabulary, not the CLI's", () => {
+  for (const group of ["low", "med", "high", "ultra"]) {
+    assert.equal(isValidClaudeModel(group), false, `${group} accepted`);
+  }
+});
+
+test("isValidClaudeModel rejects empty/absent models", () => {
+  for (const bad of ["", null, undefined]) {
+    assert.equal(isValidClaudeModel(bad), false, `${JSON.stringify(bad)} accepted`);
+  }
+});
+
+test("constructing a session on a capability class throws instead of spawning", () => {
+  assert.throws(
+    () => new ClaudeCodeSession("s1", "high", "Zibal", "/tmp"),
+    /unusable claude-code model: "high"/,
+  );
+});
+
+test("the throw names the valid models, so the error is actionable", () => {
+  assert.throws(
+    () => new ClaudeCodeSession("s1", "gpt-5", "Zibal", "/tmp"),
+    /claude-opus-5/,
+  );
 });
