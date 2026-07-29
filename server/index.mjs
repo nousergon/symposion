@@ -71,7 +71,7 @@ const TTL_WINDOW_MS = 60 * 60 * 1000; // 60 min
 // pinning symposion to whatever DeepSeek model happened to be current when
 // this line was written (it said "deepseek-chat", a model the registry
 // stopped referencing some time ago).
-const CLAUDE_CODE_DEFAULT = { modelID: "claude-sonnet-5" };
+const CLAUDE_CODE_DEFAULT = { modelID: "claude-opus-5" };
 const API_DEFAULT = { providerID: LITELLM_PROVIDER_ID, modelID: "med" };
 // ~/Development itself, not a specific repo under it - most new personas
 // aren't working on symposion, and the old default silently pointed every
