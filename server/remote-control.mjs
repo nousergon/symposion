@@ -74,7 +74,9 @@ export function transcriptPath(cwd, sessionId) {
  * temp-file rename so a crash mid-write can't truncate the CLI's config.
  */
 export function ensureWorkspaceTrusted(dir) {
-  let config = {};
+  // No `= {}` initializer: the catch below always throws, so the fallback was
+  // dead and only served to hide that fact from the reader (no-useless-assignment).
+  let config;
   try {
     config = JSON.parse(fs.readFileSync(CLAUDE_CONFIG_PATH, "utf8"));
   } catch (err) {
@@ -82,7 +84,13 @@ export function ensureWorkspaceTrusted(dir) {
     // run (or is broken) - starting remote-control would fail anyway, and
     // fabricating a fresh config wholesale risks clobbering CLI state we
     // don't understand. Fail loud instead.
-    throw new Error(`cannot read ${CLAUDE_CONFIG_PATH} to record workspace trust: ${err.message}`);
+    //
+    // `cause` matters here: without it the ENOENT-vs-SyntaxError distinction
+    // is flattened into a message string, and "never ran" and "corrupt file"
+    // want different fixes (preserve-caught-error).
+    throw new Error(`cannot read ${CLAUDE_CONFIG_PATH} to record workspace trust: ${err.message}`, {
+      cause: err,
+    });
   }
   config.projects ??= {};
   const entry = config.projects[dir] ?? {};
