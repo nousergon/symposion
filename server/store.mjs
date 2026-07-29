@@ -15,6 +15,55 @@ export const ATTACHMENTS_DIR = path.join(DATA_DIR, "attachments");
 // conversation continuity lives in claude-code's / OpenCode's own on-disk
 // session storage (confirmed empirically to survive process restarts).
 
+/**
+ * Write a file so a reader never observes it half-written.
+ *
+ * `fs.writeFileSync` opens with O_TRUNC: it empties the target first, then
+ * refills it. Anything interrupting the gap - a kill, a laptop sleep, a full
+ * disk, or launchd's KeepAlive restarting the service mid-write - leaves a
+ * truncated file. Because personas.json holds EVERY persona in one file, a
+ * partial write during a routine single-persona update destroys unrelated
+ * personas' history, and loadPersonas() then swallows the parse error and
+ * starts empty. That is total, silent loss (symposion-I90).
+ *
+ * Temp-then-rename removes the gap: rename(2) is atomic within a filesystem,
+ * so a concurrent reader sees the complete old file or the complete new one,
+ * never a partial. The temp file MUST therefore live in the target's own
+ * directory - renaming across filesystems is a copy, which is not atomic.
+ *
+ * Deliberately no fsync. Without it a power loss can lose the LAST write, but
+ * cannot corrupt the file - APFS journals the metadata, so the rename either
+ * happened or did not. Paying an fsync on every persona write (one per turn)
+ * to convert "lose the last turn" into "lose nothing" is not a trade worth
+ * making for a single-user local console; the property that matters is that
+ * the file is never garbage.
+ *
+ * On failure the temp file is removed and the error rethrown - the original
+ * is left untouched. That is a strict improvement on the previous behaviour,
+ * where a full disk truncated the real file.
+ */
+export function writeFileAtomic(filePath, contents) {
+  const dir = path.dirname(filePath);
+  // pid + random: two writers must never pick the same temp name, or one
+  // renames the other's half-written bytes over the target.
+  const tmp = path.join(dir, `.${path.basename(filePath)}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`);
+  try {
+    fs.writeFileSync(tmp, contents);
+    fs.renameSync(tmp, filePath);
+  } catch (err) {
+    // Best-effort cleanup, then rethrow. Swallowing here would leave the
+    // caller believing a write succeeded - the exact silent-failure class the
+    // fleet's fail-loud rule forbids.
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // Temp may not exist (the writeFileSync itself failed). Nothing to
+      // report: the real error is the one being rethrown below.
+    }
+    throw err;
+  }
+}
+
 export function loadPersonas() {
   if (!fs.existsSync(DATA_FILE)) return [];
   try {
@@ -27,7 +76,7 @@ export function loadPersonas() {
 
 export function savePersonas(personaRecords) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(DATA_FILE, JSON.stringify(personaRecords, null, 2));
+  writeFileAtomic(DATA_FILE, JSON.stringify(personaRecords, null, 2));
 }
 
 /**
@@ -50,7 +99,7 @@ export function loadSettings() {
 
 export function saveSettings(settings) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2));
+  writeFileAtomic(SETTINGS_FILE, JSON.stringify(settings, null, 2));
 }
 
 /**
@@ -95,7 +144,7 @@ export function saveAttachment(personaId, { filename, mime, base64 }) {
   const dir = path.join(ATTACHMENTS_DIR, personaId);
   fs.mkdirSync(dir, { recursive: true });
   const buffer = Buffer.from(base64, "base64");
-  fs.writeFileSync(path.join(dir, id), buffer);
+  writeFileAtomic(path.join(dir, id), buffer);
   return { id, filename, mime, sizeBytes: buffer.length };
 }
 
