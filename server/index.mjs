@@ -20,6 +20,7 @@ import { fetchQueue, itemToQuestion, postComment, removeLabels, addLabels, close
 import { loadRepoContext } from "./repo-context.mjs";
 import rateLimit from "express-rate-limit";
 import { migratePersonas, LITELLM_PROVIDER_ID } from "./persona-migration.mjs";
+import { makeRetryGuard, requestFingerprint } from "./retry-guard.mjs";
 
 const hub = new SseHub();
 
@@ -363,8 +364,70 @@ function promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpda
   // already the final/complete cost+tokens by the time session.idle fires.
   let usage = null;
 
+  // Build system prompt and compute request hash BEFORE the async work,
+  // so dedup detection runs synchronously even if the event loop backs up.
+  const cwd = persona.actualCwd ?? persona.workspaceDir;
+  const repoContext = loadRepoContext(cwd);
+  const systemPrompt = [
+    `Your name is ${persona.name}. If asked your name or who you are, identify yourself as ${persona.name}.`,
+    repoContext ? `\n── Repository context (${cwd}) ──\n\n${repoContext}` : "",
+  ].filter(Boolean).join("");
+
+  // Detect retry loops from ANY source — SDK-internal retry, agent loop,
+  // client re-send. The fingerprint covers everything that determines the
+  // upstream request; see server/retry-guard.mjs (symposion#59).
+  const requestHash = requestFingerprint({
+    providerID: persona.providerID,
+    modelID: persona.modelID,
+    system: systemPrompt,
+    text,
+    attachments,
+  });
+
+  // One guard per persona, created lazily and held on the live object (never
+  // persisted — toRecord() drops it, so a restart starts with a clean budget,
+  // which is correct: a restart also ends whatever loop was running).
+  persona._retryGuard ??= makeRetryGuard();
+  const verdict = persona._retryGuard.check(requestHash);
+  if (verdict.blocked) {
+    const elapsedS = Math.round(verdict.elapsedMs / 1000);
+    const kbSize = Math.round(JSON.stringify({ text, system: systemPrompt }).length / 1024);
+    console.error(
+      `[dedup:${persona.id}] blocking retry loop — request hash ${requestHash} seen ${verdict.attempts} times in ${elapsedS}s (~${kbSize}KB each)`,
+    );
+    return Promise.reject(
+      new Error(
+        `Identical ${kbSize}KB request sent ${verdict.attempts} times in ${elapsedS}s without one completing — retry loop blocked. ` +
+          `The persona is stuck resending the same prompt without a successful response. ` +
+          `Check the upstream provider status and the persona's conversation history.`,
+      ),
+    );
+  }
+
   return new Promise((resolve, reject) => {
+    // Soft guard timer: resets on permission/question events so a persona
+    // waiting on a human doesn't spuriously time out. 5 minutes is enough
+    // for any normal turn processing.
     let timeout = setTimeout(onTimeout, 5 * 60 * 1000);
+
+    // Hard guard timer: NEVER resets. Guarantees the turn ends even if the
+    // soft timer is repeatedly reset or the OpenCode SDK internally retries
+    // the upstream request (below symposion's abstraction, observable only
+    // as identical bodies at the egress proxy — symposion#59). 15 minutes
+    // is generous enough for the longest legitimate turn (multiple subagent
+    // dispatches) while still capping a cost-leaking retry loop.
+    const HARD_TIMEOUT_MS = 15 * 60 * 1000;
+    const hardTimeout = setTimeout(() => {
+      console.error(
+        `[hard-timeout:${persona.id}] turn exceeded ${HARD_TIMEOUT_MS / 60000}-minute hard limit — request hash ${requestHash}`,
+      );
+      cleanup();
+      reject(
+        new Error(
+          `OpenCode turn timed out after ${HARD_TIMEOUT_MS / 60000} minutes (hard limit — request hash ${requestHash})`,
+        ),
+      );
+    }, HARD_TIMEOUT_MS);
 
     function onTimeout() {
       cleanup();
@@ -448,6 +511,11 @@ function promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpda
         };
       } else if (evt.type === "session.idle") {
         cleanup();
+        // Release this attempt's slot — and ONLY on success. A turn that
+        // errored or timed out keeps its slot, which is precisely what lets a
+        // repeated-failure loop exhaust the budget and trip the guard, while
+        // a human resending "continue" after each completed turn never does.
+        persona._retryGuard?.settle(requestHash);
         resolve({ text: accumulated, parts: orderedParts, ...(usage ?? { costUsd: 0, usage: null }) });
       } else if (evt.type === "session.error") {
         cleanup();
@@ -463,17 +531,11 @@ function promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpda
 
     function cleanup() {
       clearTimeout(timeout);
+      clearTimeout(hardTimeout);
       events.off("event", onEvent);
     }
 
     events.on("event", onEvent);
-
-    const cwd = persona.actualCwd ?? persona.workspaceDir;
-    const repoContext = loadRepoContext(cwd);
-    const systemPrompt = [
-      `Your name is ${persona.name}. If asked your name or who you are, identify yourself as ${persona.name}.`,
-      repoContext ? `\n── Repository context (${cwd}) ──\n\n${repoContext}` : "",
-    ].filter(Boolean).join("");
 
     client.session
       .promptAsync({
