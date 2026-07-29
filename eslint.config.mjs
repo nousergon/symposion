@@ -21,7 +21,7 @@ export default [
   {
     // Client-side browser files (classic scripts loaded via <script> tag,
     // not bundled — globals from CDN/vendor are listed explicitly)
-    files: ["public/app.js", "public/sw.js"],
+    files: ["public/app.js", "public/dictation-policy.js", "public/sw.js"],
     languageOptions: {
       ecmaVersion: "latest",
       sourceType: "script",

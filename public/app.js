@@ -2160,19 +2160,47 @@ chatMessagesEl.addEventListener("drop", (e) => {
 const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognizer = null;
 let dictationBaseText = "";
+// The user's intent, which is NOT the same as "a recognition session is
+// running". The engine ends its own session on a silence gap even with
+// continuous = true; before symposion-I91 that tore everything down, so
+// dictation died on the first natural pause and the user had to notice the
+// button had changed and click again mid-thought.
+let dictationWanted = false;
+// Consecutive restarts that produced no final transcript. Bounds the restart
+// loop so a muted or absent microphone stops instead of respawning forever.
+let dictationEmptyRestarts = 0;
+// Set by onerror, consumed by onend — the two fire in that order, and onend
+// is where the restart decision belongs since it fires either way.
+let dictationLastError = null;
 
+function setMicState(on) {
+  chatMicBtnEl.classList.toggle("recording", on);
+  chatMicBtnEl.title = on ? "Listening — click to stop" : "Dictate message";
+}
+
+/** Stop at the user's request; suppresses the restart in onend. */
 function stopDictation() {
+  dictationWanted = false;
   if (recognizer) recognizer.stop();
 }
 
-function startDictation() {
+/**
+ * Create and start one recognition session. Called on the user's first click
+ * and again on every automatic restart; `dictationBaseText` carries the text
+ * accumulated so far, since each session's `event.results` starts empty.
+ */
+function startRecognitionSession() {
   dictationBaseText = chatTextEl.value.trim();
+  // Whether THIS session produced any final text — decides whether a restart
+  // counts as progress or as another empty spin.
+  let sawFinal = false;
+
   recognizer = new SpeechRecognitionCtor();
   recognizer.lang = navigator.language || "en-US";
   recognizer.continuous = true;
   recognizer.interimResults = true;
 
-  recognizer.onstart = () => chatMicBtnEl.classList.add("recording");
+  recognizer.onstart = () => setMicState(true);
 
   recognizer.onresult = (event) => {
     let finalText = "";
@@ -2182,27 +2210,69 @@ function startDictation() {
       if (result.isFinal) finalText += result[0].transcript;
       else interimText += result[0].transcript;
     }
+    if (finalText) sawFinal = true;
     const prefix = dictationBaseText ? `${dictationBaseText} ` : "";
     chatTextEl.value = `${prefix}${finalText}${interimText}`;
     resizeChatText();
   };
 
-  recognizer.onerror = () => stopDictation();
+  // Record the code; do NOT tear down here. onend always follows, and having
+  // one place decide keeps the two handlers from disagreeing. Previously this
+  // was `() => stopDictation()`, which discarded the error object entirely —
+  // a blocked microphone and a normal stop were indistinguishable to the user
+  // and in the console.
+  recognizer.onerror = (event) => {
+    dictationLastError = event?.error ?? "unknown";
+  };
 
   recognizer.onend = () => {
-    chatMicBtnEl.classList.remove("recording");
+    const error = dictationLastError;
+    dictationLastError = null;
+    dictationEmptyRestarts = sawFinal ? 0 : dictationEmptyRestarts + 1;
+
+    const verdict = window.DictationPolicy.decideDictationNext({
+      wanted: dictationWanted,
+      error,
+      emptyRestarts: dictationEmptyRestarts,
+    });
+
+    // Keep whatever was transcribed before deciding — a stop must never
+    // discard text the user already dictated.
     dictationBaseText = chatTextEl.value.trim();
     recognizer = null;
+
+    if (verdict.action === "restart") {
+      startRecognitionSession();
+      return;
+    }
+
+    dictationWanted = false;
+    dictationEmptyRestarts = 0;
+    setMicState(false);
+    if (verdict.message) {
+      console.error(`[dictation] ${verdict.reason}: ${error ?? "no error code"}`);
+      alert(verdict.message);
+    }
     chatTextEl.focus();
   };
 
   recognizer.start();
 }
 
+function startDictation() {
+  dictationWanted = true;
+  dictationEmptyRestarts = 0;
+  dictationLastError = null;
+  startRecognitionSession();
+}
+
 if (SpeechRecognitionCtor) {
+  // Only unhide. `disabled` stays under setComposerEnabled()'s control, which
+  // clears it when a persona is selected — enabling it here would let the user
+  // dictate into a composer that has nowhere to send.
   chatMicBtnEl.hidden = false;
   chatMicBtnEl.addEventListener("click", () => {
-    if (recognizer) stopDictation();
+    if (dictationWanted) stopDictation();
     else startDictation();
   });
 }
