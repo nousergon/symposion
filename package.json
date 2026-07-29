@@ -6,7 +6,7 @@
   "scripts": {
     "test": "node --test server/*.test.mjs",
     "sync-vendor": "cp node_modules/marked/lib/marked.umd.js public/vendor/marked.js && cp node_modules/dompurify/dist/purify.min.js public/vendor/purify.min.js",
-    "lint": "eslint server/ public/app.js public/sw.js"
+    "lint": "eslint server/ public/app.js public/dictation-policy.js public/sw.js"
   },
   "keywords": [],
   "author": "",
