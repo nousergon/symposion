@@ -19,6 +19,8 @@
  * a persona record written months ago.
  */
 
+import { isValidClaudeModel } from "./claude-code-backend.mjs";
+
 /** Providers whose per-provider egress-proxy ports no longer exist. */
 export const RETIRED_PROVIDER_IDS = new Set(["deepseek", "xai", "gemini"]);
 
@@ -59,14 +61,64 @@ export function migratePersonaToRouter(record, litellmProviderID = LITELLM_PROVI
 }
 
 /**
- * Applies {@link migratePersonaToRouter} across a list.
+ * Repairs a claude-code persona persisted with a model the CLI cannot use.
+ *
+ * Distinct from the router migration above, and for a different reason. The
+ * New Agent modal hid its "Model tier" dropdown for the claude-code backend
+ * but never cleared its VALUE, and the create handler read that value
+ * regardless of backend - so a claude-code persona could be created with
+ * `modelGroup: "high"`, which the server resolved to `modelID: "high"` and
+ * handed to `claude -p --model high`. Every turn came back as a 404
+ * (`model_not_found`) rendered as an ordinary assistant reply, and because
+ * the class name was also written into `lastRecipe`, every claude-code agent
+ * created afterwards inherited it (symposion-I96).
+ *
+ * Those records outlive the code fix, so they are repaired at load time
+ * rather than left to throw on spawn: an unusable model is rewritten onto the
+ * concrete default with the class dropped, since a class has no meaning in
+ * this backend and nothing recoverable is encoded in it.
+ *
+ * @param {object} record persisted persona record
+ * @param {string} defaultModelID concrete fallback (CLAUDE_CODE_DEFAULT)
+ * @returns {object} the same object when no repair applies, otherwise a new
+ *   record on a usable model. Identity is meaningful - see migratePersonas().
+ */
+export function repairClaudeCodeModel(record, defaultModelID) {
+  if (record.backend !== "claude-code") return record;
+  if (isValidClaudeModel(record.modelID) && !record.modelGroup) return record;
+  return { ...record, modelID: isValidClaudeModel(record.modelID) ? record.modelID : defaultModelID, modelGroup: null };
+}
+
+/**
+ * Same repair for the persisted `lastRecipe`, which prefills the New Agent
+ * modal. Left alone it re-mints the defect on the next agent created - the
+ * record repair above would then have to catch it again, one boot too late.
+ *
+ * @returns {object|null} the same object when no repair applies
+ */
+export function repairLastRecipe(recipe, defaultModelID) {
+  if (!recipe || recipe.backend !== "claude-code") return recipe;
+  if (isValidClaudeModel(recipe.modelID) && !recipe.modelGroup && !recipe.providerID) return recipe;
+  return {
+    ...recipe,
+    // claude-code personas have no providerID at all; one present here came
+    // from the api-backend group-resolution path leaking across.
+    providerID: null,
+    modelID: isValidClaudeModel(recipe.modelID) ? recipe.modelID : defaultModelID,
+    modelGroup: null,
+  };
+}
+
+/**
+ * Applies {@link migratePersonaToRouter} and {@link repairClaudeCodeModel}
+ * across a list.
  *
  * @returns {{records: object[], migrated: number}}
  */
-export function migratePersonas(records, litellmProviderID = LITELLM_PROVIDER_ID) {
+export function migratePersonas(records, litellmProviderID = LITELLM_PROVIDER_ID, claudeCodeDefaultModelID = "claude-opus-5") {
   let migrated = 0;
   const out = records.map((r) => {
-    const next = migratePersonaToRouter(r, litellmProviderID);
+    const next = repairClaudeCodeModel(migratePersonaToRouter(r, litellmProviderID), claudeCodeDefaultModelID);
     if (next !== r) migrated += 1;
     return next;
   });
