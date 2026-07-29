@@ -2,7 +2,7 @@ import express from "express";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
-import { randomUUID, createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import QRCode from "qrcode";
@@ -20,6 +20,7 @@ import { fetchQueue, itemToQuestion, postComment, removeLabels, addLabels, close
 import { loadRepoContext } from "./repo-context.mjs";
 import rateLimit from "express-rate-limit";
 import { migratePersonas, LITELLM_PROVIDER_ID } from "./persona-migration.mjs";
+import { makeRetryGuard, requestFingerprint } from "./retry-guard.mjs";
 
 const hub = new SseHub();
 
@@ -372,43 +373,36 @@ function promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpda
     repoContext ? `\n── Repository context (${cwd}) ──\n\n${repoContext}` : "",
   ].filter(Boolean).join("");
 
-  // Hash the request body so we can detect retry loops from ANY source
-  // (SDK-internal retry, agent loop, client re-send). The hash covers
-  // everything that determines the upstream request: model, system prompt,
-  // user text, and attachment metadata. See symposion#59.
-  const requestBody = JSON.stringify({
-    model: { providerID: persona.providerID, modelID: persona.modelID },
+  // Detect retry loops from ANY source — SDK-internal retry, agent loop,
+  // client re-send. The fingerprint covers everything that determines the
+  // upstream request; see server/retry-guard.mjs (symposion#59).
+  const requestHash = requestFingerprint({
+    providerID: persona.providerID,
+    modelID: persona.modelID,
     system: systemPrompt,
     text,
-    attachments: (attachments ?? []).map((a) => ({ mime: a.mime, filename: a.filename, len: a.base64?.length ?? 0 })),
+    attachments,
   });
-  const requestHash = createHash("sha256").update(requestBody).digest("hex").slice(0, 16);
 
-  // Dedup gate: if the SAME request hash has been sent 3+ times within a
-  // 10-minute window, this is almost certainly a stuck retry loop burning
-  // real upstream tokens (the egress proxy forwards every one — symposion#59).
-  // Block it BEFORE another expensive promptAsync call.
-  const now = Date.now();
-  const DEDUP_WINDOW_MS = 10 * 60 * 1000;
-  const DEDUP_MAX_ATTEMPTS = 3;
-  persona._requestHashes ??= [];
-  persona._requestHashes = persona._requestHashes.filter((r) => now - r.ts < DEDUP_WINDOW_MS);
-  const recentDupes = persona._requestHashes.filter((r) => r.hash === requestHash);
-  if (recentDupes.length >= DEDUP_MAX_ATTEMPTS) {
-    const elapsedS = Math.round((now - recentDupes[0].ts) / 1000);
+  // One guard per persona, created lazily and held on the live object (never
+  // persisted — toRecord() drops it, so a restart starts with a clean budget,
+  // which is correct: a restart also ends whatever loop was running).
+  persona._retryGuard ??= makeRetryGuard();
+  const verdict = persona._retryGuard.check(requestHash);
+  if (verdict.blocked) {
+    const elapsedS = Math.round(verdict.elapsedMs / 1000);
     const kbSize = Math.round(JSON.stringify({ text, system: systemPrompt }).length / 1024);
     console.error(
-      `[dedup:${persona.id}] blocking retry loop — request hash ${requestHash} seen ${recentDupes.length + 1} times in ${elapsedS}s (~${kbSize}KB each)`,
+      `[dedup:${persona.id}] blocking retry loop — request hash ${requestHash} seen ${verdict.attempts} times in ${elapsedS}s (~${kbSize}KB each)`,
     );
     return Promise.reject(
       new Error(
-        `Identical ${kbSize}KB request sent ${recentDupes.length + 1} times in ${elapsedS}s — retry loop blocked. ` +
+        `Identical ${kbSize}KB request sent ${verdict.attempts} times in ${elapsedS}s without one completing — retry loop blocked. ` +
           `The persona is stuck resending the same prompt without a successful response. ` +
           `Check the upstream provider status and the persona's conversation history.`,
       ),
     );
   }
-  persona._requestHashes.push({ hash: requestHash, ts: now });
 
   return new Promise((resolve, reject) => {
     // Soft guard timer: resets on permission/question events so a persona
@@ -517,6 +511,11 @@ function promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpda
         };
       } else if (evt.type === "session.idle") {
         cleanup();
+        // Release this attempt's slot — and ONLY on success. A turn that
+        // errored or timed out keeps its slot, which is precisely what lets a
+        // repeated-failure loop exhaust the budget and trip the guard, while
+        // a human resending "continue" after each completed turn never does.
+        persona._retryGuard?.settle(requestHash);
         resolve({ text: accumulated, parts: orderedParts, ...(usage ?? { costUsd: 0, usage: null }) });
       } else if (evt.type === "session.error") {
         cleanup();
