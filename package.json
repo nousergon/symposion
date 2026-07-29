@@ -16,19 +16,19 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@aws-sdk/client-ssm": "^3.1092.0",
-    "@opencode-ai/sdk": "^1.18.4",
+    "@aws-sdk/client-ssm": "^3.1097.0",
+    "@opencode-ai/sdk": "^1.18.9",
     "dompurify": "^3.4.12",
     "express": "^5.2.1",
     "express-rate-limit": "^8.6.1",
     "marked": "^18.0.7",
-    "opencode-ai": "^1.18.4",
+    "opencode-ai": "^1.18.9",
     "qrcode": "^1.5.4",
     "web-push": "^3.6.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
     "eslint": "^9.39.5",
-    "globals": "^17.7.0"
+    "globals": "^17.8.0"
   }
 }
