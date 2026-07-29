@@ -39,6 +39,18 @@
   <dict>
     <key>PATH</key>
     <string>/Users/brianmcmahon/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <!-- Without this, EVERY server/secrets.mjs SSM lookup fails with "The
+         security token included in the request is invalid": a launchd agent
+         inherits none of the login shell's AWS environment. resolveSecret()
+         fails soft by design (a missing optional provider key means "skip that
+         provider", not a fatal boot), so the whole thing degraded to log lines
+         nobody reads — Web Push, xAI and Gemini were all silently unavailable
+         while their keys sat correctly in SSM. See symposion#54.
+         Same profile the LiteLLM router shim uses. -->
+    <key>AWS_PROFILE</key>
+    <string>ne-admin</string>
+    <key>AWS_REGION</key>
+    <string>us-east-1</string>
   </dict>
 </dict>
 </plist>
