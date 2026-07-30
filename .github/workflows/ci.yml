@@ -41,3 +41,15 @@ jobs:
         run: npm ci
       - name: Test
         run: npm test
+      # Enforced, not informational: `npm run test:coverage` exits non-zero
+      # below the floor. The floor is a RATCHET — it may be raised as coverage
+      # improves and must never be lowered to make a change pass.
+      #
+      # It measures with c8 --all rather than node --experimental-test-coverage
+      # because the built-in only reports files that were LOADED. On this repo
+      # that silently excluded 7 server modules totalling 62% of server lines,
+      # index.mjs among them, and reported 92% for what is really 35%. A floor
+      # on that number would have been a green light over the blind spot, and
+      # a brand-new untested module would not have moved it at all.
+      - name: Coverage (enforced floor)
+        run: npm run test:coverage
