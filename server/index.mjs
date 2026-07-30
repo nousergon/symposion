@@ -20,7 +20,7 @@ import { fetchQueue, itemToQuestion, postComment, removeLabels, addLabels, close
 import { loadRepoContext } from "./repo-context.mjs";
 import rateLimit from "express-rate-limit";
 import { migratePersonas, repairLastRecipe, LITELLM_PROVIDER_ID } from "./persona-migration.mjs";
-import { makeRetryGuard, requestFingerprint } from "./retry-guard.mjs";
+import { claimTurn, settleTurn, RetryLoopBlocked } from "./turn-guard.mjs";
 
 const hub = new SseHub();
 
@@ -361,8 +361,13 @@ async function ensureConnected(persona) {
  * text-part deltas via onDelta as they arrive on the pool entry's shared
  * /event feed, and resolving with the full text (+ ordered tool-call parts,
  * for the visibility toggle - symposion#4) once the session goes idle.
+ *
+ * `systemPrompt` and `requestHash` are passed in rather than built here: the
+ * retry-loop budget that consumed them moved to the one point both backends
+ * dispatch from, and the system prompt is an input to that fingerprint, so it
+ * has to be built before the transport is chosen (symposion-I101).
  */
-function promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpdate) {
+function promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpdate, systemPrompt, requestHash) {
   const { client, events } = persona.opencodeEntry;
   const partTypes = new Map(); // partID -> type ("text" | "reasoning" | ...)
   let accumulated = "";
@@ -379,46 +384,10 @@ function promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpda
   // already the final/complete cost+tokens by the time session.idle fires.
   let usage = null;
 
-  // Build system prompt and compute request hash BEFORE the async work,
-  // so dedup detection runs synchronously even if the event loop backs up.
-  const cwd = persona.actualCwd ?? persona.workspaceDir;
-  const repoContext = loadRepoContext(cwd);
-  const systemPrompt = [
-    `Your name is ${persona.name}. If asked your name or who you are, identify yourself as ${persona.name}.`,
-    repoContext ? `\n── Repository context (${cwd}) ──\n\n${repoContext}` : "",
-  ].filter(Boolean).join("");
-
-  // Detect retry loops from ANY source — SDK-internal retry, agent loop,
-  // client re-send. The fingerprint covers everything that determines the
-  // upstream request; see server/retry-guard.mjs (symposion#59).
-  const requestHash = requestFingerprint({
-    providerID: persona.providerID,
-    modelID: persona.modelID,
-    system: systemPrompt,
-    text,
-    attachments,
-  });
-
-  // One guard per persona, created lazily and held on the live object (never
-  // persisted — toRecord() drops it, so a restart starts with a clean budget,
-  // which is correct: a restart also ends whatever loop was running).
-  persona._retryGuard ??= makeRetryGuard();
-  const verdict = persona._retryGuard.check(requestHash);
-  if (verdict.blocked) {
-    const elapsedS = Math.round(verdict.elapsedMs / 1000);
-    const kbSize = Math.round(JSON.stringify({ text, system: systemPrompt }).length / 1024);
-    console.error(
-      `[dedup:${persona.id}] blocking retry loop — request hash ${requestHash} seen ${verdict.attempts} times in ${elapsedS}s (~${kbSize}KB each)`,
-    );
-    return Promise.reject(
-      new Error(
-        `Identical ${kbSize}KB request sent ${verdict.attempts} times in ${elapsedS}s without one completing — retry loop blocked. ` +
-          `The persona is stuck resending the same prompt without a successful response. ` +
-          `Check the upstream provider status and the persona's conversation history.`,
-      ),
-    );
-  }
-
+  // The retry-loop budget used to live here, which meant it bound this
+  // transport and only this one. It now runs in the message handler, which is
+  // the single point both backends dispatch from - see server/turn-guard.mjs
+  // and symposion-I101.
   return new Promise((resolve, reject) => {
     // Soft guard timer: resets on permission/question events so a persona
     // waiting on a human doesn't spuriously time out. 5 minutes is enough
@@ -532,11 +501,9 @@ function promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpda
         };
       } else if (evt.type === "session.idle") {
         cleanup();
-        // Release this attempt's slot — and ONLY on success. A turn that
-        // errored or timed out keeps its slot, which is precisely what lets a
-        // repeated-failure loop exhaust the budget and trip the guard, while
-        // a human resending "continue" after each completed turn never does.
-        persona._retryGuard?.settle(requestHash);
+        // The slot is released by the handler once this promise resolves -
+        // settling here as well would double-release, and settling on any
+        // path but success would disarm the guard. See settleTurn().
         resolve({ text: accumulated, parts: orderedParts, ...(usage ?? { costUsd: 0, usage: null }) });
       } else if (evt.type === "session.error") {
         cleanup();
@@ -1407,6 +1374,29 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     let costUsd = 0;
     let usage = null;
 
+    // The per-turn system prompt, for backends that take one. The
+    // `claude-code` CLI gets its identity at spawn (--append-system-prompt)
+    // and reads repo context itself, so it has none - and passing null rather
+    // than a constant keeps that absence out of its fingerprint.
+    const cwd = persona.actualCwd ?? persona.workspaceDir;
+    const repoContext = persona.backend === "api" ? loadRepoContext(cwd) : null;
+    const systemPrompt =
+      persona.backend === "api"
+        ? [
+            `Your name is ${persona.name}. If asked your name or who you are, identify yourself as ${persona.name}.`,
+            repoContext ? `\n── Repository context (${cwd}) ──\n\n${repoContext}` : "",
+          ]
+            .filter(Boolean)
+            .join("")
+        : null;
+
+    // Claim a retry-budget slot BEFORE dispatching, for whichever backend is
+    // about to run. This sits above the backend branch on purpose: it used to
+    // live inside promptOpenCodeStreaming, which left the `claude-code`
+    // transport - the only one with a self-resending /loop - unbounded
+    // (symposion-I101). Released only on success, at the bottom of this try.
+    const requestHash = claimTurn(persona, { text, attachments, system: systemPrompt });
+
     // Held as a local and compared by identity below, rather than reached
     // for through `persona.pendingTurn` on every callback. Both callbacks
     // outlive the turn that created them: they are captured by the backend's
@@ -1452,7 +1442,7 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     };
 
     if (persona.backend === "api") {
-      const result = await promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpdate);
+      const result = await promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpdate, systemPrompt, requestHash);
       replyText = result.text;
       parts = result.parts;
       costUsd = result.costUsd ?? 0;
@@ -1465,6 +1455,10 @@ app.post("/api/personas/:id/messages", async (req, res) => {
       costUsd = result.costUsd ?? 0;
       usage = result.usage ?? null;
     }
+
+    // Reached only when the turn actually completed - every failure path
+    // throws past this line and correctly leaves the slot held.
+    settleTurn(persona, requestHash);
 
     persona.pendingTurn = null;
     persona.lastActivityTs = Date.now();
@@ -1494,6 +1488,17 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     res.json({ persona: personaSummary(persona), reply: replyText, denials, parts, costUsd, usage });
   } catch (err) {
     persona.pendingTurn = null;
+    // A blocked retry loop is a client-side condition, not a server fault:
+    // answering it 500 buries "you are in a loop" among genuine upstream
+    // failures, and T0-3 requires this one fail LOUDLY. 429 also stops a
+    // naive client from treating it as a transient error worth retrying -
+    // which is the very behaviour the guard exists to bound.
+    if (err instanceof RetryLoopBlocked) {
+      console.error(
+        `[dedup:${persona.id}] blocking retry loop — request hash ${err.requestHash} seen ${err.attempts} times in ${Math.round(err.elapsedMs / 1000)}s`,
+      );
+      return res.status(429).json({ error: err.message });
+    }
     console.error(err);
     res.status(500).json({ error: String(err) });
   }
