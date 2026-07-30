@@ -453,6 +453,12 @@ function promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpda
       const props = evt.properties;
       if (!props || props.sessionID !== persona.sessionID) return;
 
+      // Liveness clock for this backend - the `api` half of turnIdleMs().
+      // Any event for this session is proof of life, whatever type it is.
+      // Live-only: toRecord()'s allowlist drops it, which is correct since a
+      // restart ends whatever turn it was measuring.
+      persona.lastTurnEventTs = Date.now();
+
       if (evt.type === "message.part.updated" && props.part?.id) {
         const { id, type } = props.part;
         partTypes.set(id, type);
@@ -669,6 +675,26 @@ function accumulateUsage(persona, costUsd, usage) {
   persona.totalUsage = t;
 }
 
+/**
+ * How long the in-flight turn has produced NO output, in ms — null when no
+ * turn is in flight OR when this backend cannot measure it.
+ *
+ * symposion-policy.md T0-2 requires that a persona with no output for a
+ * bounded interval render as stalled rather than as working, and `working`
+ * alone (a plain "is a turn in flight" boolean) cannot carry that: a persona
+ * streaming tokens and a persona whose subprocess died mid-turn were
+ * rendered identically, which is why the only stall signal Brian ever got
+ * was the guard killing the turn several minutes later.
+ *
+ * Deliberately null rather than 0 for "not measured" — a caller must not be
+ * able to read an absent measurement as a healthy one.
+ */
+function turnIdleMs(p) {
+  if (!p.pendingTurn) return null;
+  if (p.backend === "claude-code") return p.claudeSession?.idleMs ?? null;
+  return p.lastTurnEventTs == null ? null : Date.now() - p.lastTurnEventTs;
+}
+
 function personaSummary(p) {
   const { remainingMs, status } = ttlInfo(p);
   return {
@@ -690,6 +716,10 @@ function personaSummary(p) {
     alive: p.backend === "claude-code" ? (p.claudeSession ? p.claudeSession.alive : true) : true,
     blocked: (p.lastDenials?.length ?? 0) > 0 || !!p.pendingPermission || !!p.pendingQuestion,
     working: !!p.pendingTurn,
+    // See turnIdleMs() - the T0-2 "stalled is distinguishable from thinking"
+    // signal. null means no turn in flight, or a backend that cannot report
+    // it; the UI must not render that as healthy.
+    turnIdleMs: turnIdleMs(p),
     // True from the moment a turn finishes while Brian wasn't watching this
     // persona (same presence gate as notifyTurnFinished below) until he
     // actually selects it again (cleared in POST /api/presence) - the
@@ -1377,13 +1407,33 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     let costUsd = 0;
     let usage = null;
 
-    persona.pendingTurn = { text: "", parts: [] };
+    // Held as a local and compared by identity below, rather than reached
+    // for through `persona.pendingTurn` on every callback. Both callbacks
+    // outlive the turn that created them: they are captured by the backend's
+    // queue entry, and an event arriving after this turn settled (a guard
+    // fired, the process exited, a second turn superseded it) used to
+    // dereference a `pendingTurn` the catch block had already nulled. That
+    // threw an uncaught TypeError — "Cannot read properties of null (reading
+    // 'parts')" — from a readline callback with no enclosing try, which
+    // killed the whole server and every OTHER persona's in-flight turn with
+    // it (confirmed live in ~/Library/Logs/symposion.err.log). Comparing
+    // identity also stops a stale turn's late events from corrupting the
+    // live turn's transcript, which a plain null check would still allow.
+    const turn = { text: "", parts: [] };
+    persona.pendingTurn = turn;
+    // Start the liveness clock at the turn's start, not at its first event -
+    // a turn whose backend never emits anything at all must still read as
+    // silent, and a leftover timestamp from the PREVIOUS turn would
+    // otherwise make a brand-new turn look stale the moment it begins.
+    persona.lastTurnEventTs = Date.now();
+    const isLive = () => persona.pendingTurn === turn;
     const onDelta = (chunk) => {
+      if (!isLive()) return;
       // Order matters: persist the chunk into pendingTurn.text BEFORE
       // publishing it, since a client's GET .../messages and this SSE
       // publish must agree on exactly which chunks are "in" vs "not yet
       // arrived" - see the GET handler's doc comment above.
-      persona.pendingTurn.text += chunk;
+      turn.text += chunk;
       hub.publish(persona.id, { type: "delta", text: chunk });
     };
     // Same order-matters rule as onDelta above, and the same reconnect-safety
@@ -1394,9 +1444,10 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     // actually working or the persona has stalled (symposion "better tool
     // call progress visibility").
     const onToolUpdate = (toolUpdate) => {
-      const idx = persona.pendingTurn.parts.findIndex((p) => p.toolUseId === toolUpdate.toolUseId);
-      if (idx >= 0) persona.pendingTurn.parts[idx] = toolUpdate;
-      else persona.pendingTurn.parts.push(toolUpdate);
+      if (!isLive()) return;
+      const idx = turn.parts.findIndex((p) => p.toolUseId === toolUpdate.toolUseId);
+      if (idx >= 0) turn.parts[idx] = toolUpdate;
+      else turn.parts.push(toolUpdate);
       hub.publish(persona.id, { type: "tool", ...toolUpdate });
     };
 

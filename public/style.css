@@ -107,6 +107,12 @@ body {
 .activity-dot.idle { background: #5a5a5e; }
 .activity-dot.working { background: #0a84ff; animation: activity-pulse 1.2s ease-in-out infinite; }
 .activity-dot.blocked { background: #ff453a; }
+/* A turn that is in flight but has produced no output for a while. Amber and
+   NOT pulsing: the pulse is what reads as "actively producing", and this is
+   precisely the state where that reassurance is unearned. Distinct from
+   blocked (red - needs input) because nothing is being asked of Brian here.
+   symposion-policy.md T0-2 - see STALL_VISIBLE_MS in app.js. */
+.activity-dot.stalled { background: #ff9f0a; }
 /* Turn finished while Brian wasn't watching this persona - "come look",
    distinct from both the pulsing-blue working dot and the static-grey idle
    one it would otherwise be indistinguishable from once a turn completes. */

@@ -121,15 +121,35 @@ function toContentBlock(a) {
   return { type: "document", source: { type: "base64", media_type: a.mime, data: a.base64 }, title: a.filename };
 }
 
-// A claude-code turn that runs longer than this is almost certainly hung
-// (deadlocked tool loop, crashed child process never exiting, subagent
-// dispatch stuck). Without this guard, a hung claude -p process leaves the
-// persona in working:true state forever with no error surfaced — the core
-// root cause of symposion's "agent became unresponsive" reports.
-// 10 minutes covers a genuine long turn (multiple subagent dispatches at
-// the 5-minute agent timeout + buffer) while still surfacing a true hang
-// before the user gives up and refreshes.
-const TURN_TIMEOUT_MS = 10 * 60 * 1000;
+// Two guards, because "how long has this turn been running" and "how long
+// has this process been silent" answer different questions, and only the
+// second one distinguishes a hung process from a working one.
+//
+// The single wall-clock cap these replace killed HEALTHY turns. Observed
+// live 2026-07-30: a research turn that had streamed 31 tool calls and was
+// still emitting events was killed at the 10-minute mark and reported to
+// the user as "process killed" — a guard whose whole purpose is to tell a
+// stalled persona from a thinking one, firing on a thinking one. An
+// elapsed-time predicate cannot make that distinction at all, which is why
+// symposion-policy.md T0-2 states the requirement as "no output for a
+// bounded interval", not "running for a bounded interval".
+//
+// IDLE is the real liveness predicate. A `claude -p --output-format
+// stream-json` process emits an event for every text delta, tool_use and
+// tool_result, so a hang looks like SILENCE, not like duration. 15 minutes
+// clears the longest legitimate gap between two events — a Bash call at the
+// CLI's own 600s ceiling, or a synchronous Agent dispatch, both of which
+// emit nothing at all between their tool_use and their tool_result — with
+// margin. The clock it reads (`lastEventAt`) is stamped in _handleLine on
+// every event the process produces, whatever type it is.
+//
+// HARD never resets. It exists only to bound a pathological tool loop that
+// keeps emitting events forever and so would never trip the idle guard —
+// the same job, and the same reasoning, as the OpenCode path's own hard
+// timer in server/index.mjs. It is deliberately far above any real turn: it
+// is a runaway backstop, not an opinion about how long work may take.
+export const TURN_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+export const TURN_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 
 export class ClaudeCodeSession {
   /**
@@ -143,8 +163,16 @@ export class ClaudeCodeSession {
    * @param {string|null} [effortLevel] - one of CLAUDE_EFFORT_LEVELS' values,
    *   or null/"" to omit --effort entirely and let the CLI resolve its own
    *   default.
+   * @param {{spawnFn?: Function}} [opts] - `spawnFn` overrides child_process
+   *   .spawn. Test seam only, and a deliberately narrow one: the turn guards
+   *   and the stdin/exit crash paths are only meaningfully testable against a
+   *   process whose output and death this side controls, and the alternative
+   *   (asserting on a hand-built object grafted onto the prototype) tests a
+   *   stand-in rather than the wiring the constructor actually performs -
+   *   which is exactly where these defects lived. No production caller passes
+   *   it, so the real spawn stays the only path in the running service.
    */
-  constructor(sessionId, model, personaName, workspaceDir, resume = false, permissionMode = null, effortLevel = null) {
+  constructor(sessionId, model, personaName, workspaceDir, resume = false, permissionMode = null, effortLevel = null, opts = {}) {
     // RAISE rather than spawn a process that will answer every turn with a
     // 404 dressed as an assistant message - see isValidClaudeModel(). This is
     // the single chokepoint for every spawn path (create, model switch,
@@ -157,6 +185,13 @@ export class ClaudeCodeSession {
     this.alive = true;
     this.queue = []; // pending {resolve, reject} for sendMessage calls, one at a time
     this.crashError = null;
+
+    // Epoch ms of the last event this process produced, or null when no turn
+    // is in flight. This is the liveness clock the idle guard reads, and the
+    // same clock `idleMs` exposes to the UI so a persona that has gone quiet
+    // renders as quiet rather than as indistinguishably "Working…"
+    // (symposion-policy.md T0-2, P4).
+    this.lastEventAt = null;
 
     // { at: epochMs, reason } when this persona's last completed turn ended
     // with a live ScheduleWakeup call (/loop dynamic-mode); null otherwise.
@@ -184,7 +219,8 @@ export class ClaudeCodeSession {
     const permissionArgs = permissionMode ? ["--permission-mode", permissionMode] : [];
     const effortArgs = effortLevel ? ["--effort", effortLevel] : [];
 
-    this.proc = spawn(CLAUDE_BIN, [
+    const spawnFn = opts.spawnFn ?? spawn;
+    this.proc = spawnFn(CLAUDE_BIN, [
       "-p",
       "--output-format", "stream-json",
       "--input-format", "stream-json",
@@ -235,8 +271,7 @@ export class ClaudeCodeSession {
       this.alive = false;
       this.crashError = `claude process failed to start: ${err.message}`;
       console.error(`[claude:${sessionId}] spawn error:`, err);
-      for (const { reject, timeout } of this.queue) { clearTimeout(timeout); reject(new Error(this.crashError)); }
-      this.queue = [];
+      this._drainQueue(this.crashError);
     });
 
     this.proc.on("exit", (code, signal) => {
@@ -245,10 +280,54 @@ export class ClaudeCodeSession {
       this.alive = false;
       if (this.queue.length > 0) {
         this.crashError = `claude process exited (code=${code}, signal=${signal}) while a message was in flight`;
-        for (const { reject, timeout } of this.queue) { clearTimeout(timeout); reject(new Error(this.crashError)); }
-        this.queue = [];
+        this._drainQueue(this.crashError);
       }
     });
+
+    // Writing to a dead child's stdin emits 'error' on the STREAM, and with
+    // no listener that is an uncaught exception which takes the entire
+    // symposion process down — every other persona's in-flight turn with it.
+    // Confirmed live: `Error: write EPIPE` killed the server outright after
+    // the CLI exited on "No conversation found with session ID", and launchd
+    // restarted into a console where every running turn had silently
+    // vanished. This is the SAME defect shape the proc.on("error") handler
+    // above documents; the fix was applied to the spawn path in that pass and
+    // never to the write path, so the class survived its own fix.
+    //
+    // The 'exit' handler cannot cover this: it fires asynchronously, so a
+    // write issued in the window between the child dying and Node delivering
+    // 'exit' still lands on a closed pipe with `this.alive` still true.
+    this.proc.stdin.on("error", (err) => {
+      this.alive = false;
+      console.error(`[claude:${sessionId}] stdin error:`, err.message);
+      this.crashError ??= `claude process stdin closed (${err.code ?? err.message}) — the CLI exited underneath a write`;
+      this._drainQueue(this.crashError);
+    });
+  }
+
+  /**
+   * Reject every queued turn with `message` and clear its guard timers.
+   * Every terminal path (spawn error, exit, stdin EPIPE) ends here so none
+   * of them can leave a live timer pointing at an already-settled promise.
+   */
+  _drainQueue(message) {
+    for (const entry of this.queue.splice(0)) {
+      clearTimeout(entry.idleTimer);
+      clearTimeout(entry.hardTimer);
+      entry.reject(new Error(message));
+    }
+    this.lastEventAt = null;
+  }
+
+  /**
+   * How long this process has produced NO output, in ms — null when no turn
+   * is in flight. Read by the UI (via personaSummary) so silence is visible
+   * as silence long before the idle guard acts on it: a persona that has
+   * been quiet for six minutes and one that is streaming tokens rendered
+   * identically before this, which is the exact confusion T0-2 names.
+   */
+  get idleMs() {
+    return this.lastEventAt === null ? null : Date.now() - this.lastEventAt;
   }
 
   _handleLine(line) {
@@ -259,6 +338,12 @@ export class ClaudeCodeSession {
     } catch {
       return; // non-JSON line (shouldn't happen with stream-json, but don't crash on it)
     }
+
+    // Any parseable event is proof of life, whatever kind it is — that is
+    // the whole point of an idle predicate over an elapsed-time one. Set
+    // before the per-type branches below so a type this method doesn't
+    // otherwise handle still counts as the process being alive.
+    if (this.queue.length > 0) this.lastEventAt = Date.now();
 
     if (evt.type === "stream_event") {
       const e = evt.event;
@@ -314,8 +399,10 @@ export class ClaudeCodeSession {
     if (evt.type === "result") {
       this.blockTypes.clear();
       const pending = this.queue.shift();
+      if (this.queue.length === 0) this.lastEventAt = null;
       if (pending) {
-        clearTimeout(pending.timeout);
+        clearTimeout(pending.idleTimer);
+        clearTimeout(pending.hardTimer);
         pending.resolve({
           replyText: evt.result ?? "",
           permissionDenials: evt.permission_denials ?? [],
@@ -376,26 +463,55 @@ export class ClaudeCodeSession {
       return Promise.reject(new Error(this.crashError || "claude process is not running"));
     }
     return new Promise((resolve, reject) => {
-      const entry = { resolve, reject, onDelta, onToolUpdate, timeout: null };
+      const entry = { resolve, reject, onDelta, onToolUpdate, idleTimer: null, hardTimer: null };
 
-      // Per-turn timeout guard — if the claude process hangs (deadlocked
-      // tool loop, stuck subagent dispatch, crashed child never exiting),
-      // this surfaced the failure instead of leaving the persona in
-      // working:true state forever. On timeout the process is killed so the
+      // Both guards end the turn the same way: the process is killed, so the
       // next reconnect starts fresh rather than resuming a poisoned session.
-      entry.timeout = setTimeout(() => {
+      const failTurn = (message) => {
         const idx = this.queue.indexOf(entry);
-        if (idx >= 0) this.queue.splice(idx, 1);
-        if (idx === 0) {
-          // The in-flight turn is what timed out — the process is hung.
-          this.alive = false;
-          this.crashError = `claude process timed out after ${TURN_TIMEOUT_MS / 60000} minutes — process killed`;
-          this.proc.kill();
+        if (idx < 0) return; // already settled by a result/exit/stdin path
+        this.queue.splice(idx, 1);
+        clearTimeout(entry.idleTimer);
+        clearTimeout(entry.hardTimer);
+        // Killed unconditionally, not only when this entry was at the head.
+        // The idle predicate is a property of the PROCESS (nothing at all
+        // has been emitted), so a queued turn observing it is observing the
+        // same hang the head turn is; and a head turn that has run past the
+        // hard cap is not a process a queued turn should be handed to.
+        this.alive = false;
+        this.crashError = message;
+        this.proc.kill();
+        reject(new Error(message));
+      };
+
+      // Idle guard. Re-arms rather than being reset per event: a turn emits
+      // one event per streamed token, and clearTimeout/setTimeout on every
+      // one of those is thousands of timer churns per turn for no benefit.
+      // Instead it wakes at the deadline, re-reads the liveness clock, and
+      // only fails when the process has GENUINELY been silent that long.
+      const checkIdle = () => {
+        const idleFor = this.lastEventAt === null ? 0 : Date.now() - this.lastEventAt;
+        if (idleFor < TURN_IDLE_TIMEOUT_MS) {
+          entry.idleTimer = setTimeout(checkIdle, TURN_IDLE_TIMEOUT_MS - idleFor);
+          return;
         }
-        reject(new Error(this.crashError || "turn timed out"));
-      }, TURN_TIMEOUT_MS);
+        failTurn(
+          `claude process produced no output for ${TURN_IDLE_TIMEOUT_MS / 60000} minutes — process killed`,
+        );
+      };
+      entry.idleTimer = setTimeout(checkIdle, TURN_IDLE_TIMEOUT_MS);
+
+      entry.hardTimer = setTimeout(() => {
+        failTurn(
+          `claude turn exceeded the ${TURN_HARD_TIMEOUT_MS / 3600000}-hour hard limit while still emitting events — process killed`,
+        );
+      }, TURN_HARD_TIMEOUT_MS);
 
       this.queue.push(entry);
+      // Start the liveness clock at enqueue: until the process emits its
+      // first event there is nothing else to measure silence from, and a
+      // process that never answers at all must still trip the idle guard.
+      this.lastEventAt ??= Date.now();
       // No attachments: keep the plain-string content shape exactly as
       // before (zero wire-format change for the common case). With
       // attachments, switch to an Anthropic content-block array - the same
@@ -408,12 +524,22 @@ export class ClaudeCodeSession {
           ? text
           : [...(text ? [{ type: "text", text }] : []), ...attachments.map(toContentBlock)];
       const line = JSON.stringify({ type: "user", message: { role: "user", content } });
+      // `this.alive` is not sufficient on its own: it is cleared by the
+      // 'exit' handler, which fires asynchronously, so a child that has
+      // already gone still reads as alive here. Checking the stream itself
+      // closes that window; the stdin 'error' listener in the constructor
+      // catches what remains (the child dying mid-write).
+      if (!this.proc.stdin.writable) {
+        failTurn("claude process stdin is closed — the CLI is no longer running");
+        return;
+      }
       this.proc.stdin.write(line + "\n");
     });
   }
 
   kill() {
     this.alive = false;
+    this.lastEventAt = null;
     this.proc.kill();
   }
 }

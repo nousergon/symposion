@@ -675,10 +675,35 @@ function wakeupCountdown(atMs) {
  * for a genuinely idle persona with nothing pending, so this doesn't add
  * noise to the common case.
  */
+/**
+ * Past this much silence, a working persona is described by how long it has
+ * been quiet rather than as an undifferentiated "Working…".
+ *
+ * 3 minutes is well above the gap between events in a healthy turn (which is
+ * seconds - one event per streamed token) and far below the server-side idle
+ * guard that eventually kills the turn, so this is the EARLY signal, not a
+ * duplicate of the guard. It is stated as an observation ("no output for
+ * 6m"), never as a verdict: a synchronous subagent dispatch legitimately
+ * emits nothing for minutes, and the honest thing to show is the fact.
+ *
+ * symposion-policy.md T0-2: a persona with no output for a bounded interval
+ * must render as stalled, not as working. Before this, the only stall signal
+ * that ever reached Brian was the guard's kill, minutes after the fact.
+ */
+const STALL_VISIBLE_MS = 3 * 60 * 1000;
+
+function idleLabel(ms) {
+  return ms < 60000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 60000)}m`;
+}
+
 function statusLabel(p) {
   const bits = [];
-  if (p.working) bits.push("Working…");
-  else if (p.readyForReview && !p.blocked) bits.push("Ready for review");
+  if (p.working) {
+    // turnIdleMs is null when the backend cannot measure silence. That is
+    // "unmeasured", not "fine" - so it falls through to plain "Working…"
+    // and never to a reassuring stall-free claim.
+    bits.push(p.turnIdleMs >= STALL_VISIBLE_MS ? `Working… no output for ${idleLabel(p.turnIdleMs)}` : "Working…");
+  } else if (p.readyForReview && !p.blocked) bits.push("Ready for review");
   if (p.backgroundActive) bits.push("Background task running");
   if (p.scheduledWakeup) bits.push(`Wakes ${wakeupCountdown(p.scheduledWakeup.at)}`);
   return bits.length ? bits.join(" · ") : null;
@@ -695,10 +720,15 @@ function renderPersonaList(personas) {
     const ready = p.readyForReview && !p.blocked;
     li.className =
       "persona-item" + (p.id === activePersonaId ? " active" : "") + (p.blocked ? " blocked" : "") + (ready ? " ready-for-review" : "");
-    const activityState = p.blocked ? "blocked" : ready ? "ready" : p.working ? "working" : "idle";
+    // "stalled" outranks "working" for the same reason blocked outranks
+    // ready: a turn in flight that has gone quiet is the state Brian needs to
+    // see, and rendering it with the pulsing working dot is the T0-2 failure.
+    const stalled = p.working && p.turnIdleMs >= STALL_VISIBLE_MS;
+    const activityState = p.blocked ? "blocked" : ready ? "ready" : stalled ? "stalled" : p.working ? "working" : "idle";
     const activityTitle = {
       blocked: "Blocked - needs your input",
       ready: "Ready for review",
+      stalled: "In flight, but no output for a while - may be a long tool call, may be stuck",
       working: "Working",
       idle: "Idle",
     }[activityState];
