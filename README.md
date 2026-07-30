@@ -1,9 +1,10 @@
 # symposion
 
 [![CI](https://github.com/nousergon/symposion/actions/workflows/ci.yml/badge.svg)](https://github.com/nousergon/symposion/actions/workflows/ci.yml)
+[![coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fnousergon%2Fsymposion%2Fbadges%2Fcoverage.json)](https://github.com/nousergon/symposion/actions/workflows/coverage-badge.yml)
 [![Gitleaks scan](https://github.com/nousergon/symposion/actions/workflows/gitleaks.yml/badge.svg)](https://github.com/nousergon/symposion/actions/workflows/gitleaks.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Node](https://img.shields.io/badge/node-20+-blue.svg)](https://nodejs.org/)
+[![License](https://img.shields.io/github/license/nousergon/symposion)](LICENSE)
+[![Node](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fnousergon%2Fsymposion%2Fmain%2Fpackage.json&query=%24.engines.node&label=node&color=blue)](https://nodejs.org/)
 
 *Symposion* (Greek: a gathering for shared discussion) is a personal web app that replaces a terminal full of `claude` sessions with a chat UI: a roster of named personas, each pinned to a model/backend/workspace, with live status (TTL countdown, blocked-on-permission, crashed) instead of guessing what a background session is doing.
 
