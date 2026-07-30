@@ -731,7 +731,17 @@ function statusLabel(p) {
   } else if (p.readyForReview && !p.blocked) bits.push("Ready for review");
   if (p.backgroundActive) bits.push("Background task running");
   if (p.scheduledWakeup) bits.push(`Wakes ${wakeupCountdown(p.scheduledWakeup.at)}`);
+  // Last outcome was a transport failure and nothing has succeeded since. Sits
+  // last so it never displaces "Working…" - a persona that is retrying right
+  // now is better described by what it is doing than by what last failed.
+  if (p.lastTransportFailure && !p.working) bits.push(`Failed: ${transportFailureLabel(p.lastTransportFailure)}`);
   return bits.length ? bits.join(" · ") : null;
+}
+
+/** Short human label for a recorded transport failure. */
+function transportFailureLabel(f) {
+  if (f.kind === "retry-loop-blocked") return "retry loop blocked";
+  return f.kind ?? "transport error";
 }
 
 /**
@@ -851,12 +861,17 @@ function renderPersonaList(personas) {
     // ready: a turn in flight that has gone quiet is the state Brian needs to
     // see, and rendering it with the pulsing working dot is the T0-2 failure.
     const stalled = p.working && p.turnIdleMs >= STALL_VISIBLE_MS;
-    const activityState = p.blocked ? "blocked" : ready ? "ready" : stalled ? "stalled" : p.working ? "working" : "idle";
+    // A recorded transport failure outranks "idle" but not anything the
+    // persona is actively doing: an idle-looking persona whose last turn was
+    // refused is exactly the state that was previously invisible.
+    const failed = !!p.lastTransportFailure && !p.working && !p.blocked;
+    const activityState = p.blocked ? "blocked" : ready ? "ready" : stalled ? "stalled" : p.working ? "working" : failed ? "failed" : "idle";
     const activityTitle = {
       blocked: "Blocked - needs your input",
       ready: "Ready for review",
       stalled: "In flight, but no output for a while - may be a long tool call, may be stuck",
       working: "Working",
+      failed: p.lastTransportFailure ? `Last turn failed: ${p.lastTransportFailure.detail ?? transportFailureLabel(p.lastTransportFailure)}` : "Last turn failed",
       idle: "Idle",
     }[activityState];
     const status = statusLabel(p);

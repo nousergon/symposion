@@ -282,6 +282,11 @@ export function toRecord(p) {
     // consumed by the next turn and then cleared. Persisted so a restart
     // between the reset and the next message doesn't silently drop it.
     carryOverSummary: p.carryOverSummary ?? null,
+    // Persisted so an unattended persona that tripped the retry guard is still
+    // visibly failed after a restart. A restart clears the guard's BUDGET (by
+    // design - it also ends whatever loop was running), but the fact that the
+    // last outcome was a failure is not something a restart should erase.
+    lastTransportFailure: p.lastTransportFailure ?? null,
     lastDenials: p.lastDenials ?? [],
     totalCostUsd: p.totalCostUsd ?? 0,
     totalUsage: p.totalUsage ?? null,

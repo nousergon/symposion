@@ -750,6 +750,11 @@ function personaSummary(p) {
     // sessions" affordance - without it a reset would look like the transcript
     // was simply destroyed.
     archivedSessions: (p.sessionArchives ?? []).length,
+    // The last transport-level failure, or null once a turn has completed
+    // since. T0-3's "marks the persona failed" - see the RetryLoopBlocked
+    // branch in the message handler for why this reaches the sidebar rather
+    // than living only in the transcript.
+    lastTransportFailure: p.lastTransportFailure ?? null,
     // True from the moment a turn finishes while Brian wasn't watching this
     // persona (same presence gate as notifyTurnFinished below) until he
     // actually selects it again (cleared in POST /api/presence) - the
@@ -1696,6 +1701,10 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     // Reached only when the turn actually completed - every failure path
     // throws past this line and correctly leaves the slot held.
     settleTurn(persona, requestHash);
+    // A completed turn supersedes any recorded transport failure. This is the
+    // whole clearing mechanism: the flag states the last OUTCOME, so a better
+    // outcome replaces it (symposion-I103).
+    persona.lastTransportFailure = null;
 
     persona.pendingTurn = null;
     persona.lastActivityTs = Date.now();
@@ -1739,6 +1748,24 @@ app.post("/api/personas/:id/messages", async (req, res) => {
       console.error(
         `[dedup:${persona.id}] blocking retry loop — request hash ${err.requestHash} seen ${err.attempts} times in ${Math.round(err.elapsedMs / 1000)}s`,
       );
+      // T0-3's third clause: "...and marks the persona failed" (symposion-I103).
+      // The 429 and the error bubble are enough when Brian is looking at this
+      // persona. The case they do not cover is an unattended /loop persona:
+      // it trips the guard, sits quiet, trips it again on the next wakeup, and
+      // every occurrence is visible only in a transcript nobody opens and a
+      // log line nobody reads. That is the fleet's most-recorded defect class
+      // — absence of signal read as benign — so the state has to reach the
+      // standing surface.
+      //
+      // A fact about the last outcome, not a mode to exit: cleared by the next
+      // turn that COMPLETES (see the success path above). Nothing to
+      // acknowledge, nothing to get stuck in.
+      persona.lastTransportFailure = {
+        at: Date.now(),
+        kind: "retry-loop-blocked",
+        detail: `the same request was sent ${err.attempts} times in ${Math.round(err.elapsedMs / 1000)}s without one completing`,
+      };
+      persistAll();
       return res.status(429).json({ error: err.message });
     }
     console.error(err);
