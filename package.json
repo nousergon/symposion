@@ -6,7 +6,8 @@
   "scripts": {
     "test": "node --test server/*.test.mjs",
     "sync-vendor": "cp node_modules/marked/lib/marked.umd.js public/vendor/marked.js && cp node_modules/dompurify/dist/purify.min.js public/vendor/purify.min.js",
-    "lint": "eslint server/ public/app.js public/dictation-policy.js public/sw.js"
+    "lint": "eslint server/ public/app.js public/dictation-policy.js public/sw.js",
+    "test:coverage": "c8 --all --include 'server/**/*.mjs' --exclude '**/*.test.mjs' --reporter=text --reporter=text-summary --check-coverage --lines 34 node --test server/*.test.mjs"
   },
   "keywords": [],
   "author": "",
@@ -28,6 +29,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "c8": "^12.0.0",
     "eslint": "^10.8.0",
     "globals": "^17.8.0"
   }
