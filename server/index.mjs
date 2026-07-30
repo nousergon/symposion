@@ -773,7 +773,7 @@ async function createPersonaFromRecipe({ backend, providerID, modelID, modelGrou
     let isolated = false;
     let worktreeBranch = null;
     if (isGitRepo(workspaceDir)) {
-      const wt = createIsolatedWorktree(workspaceDir, name, randomUUID());
+      const wt = createIsolatedWorktree(workspaceDir, name, randomUUID(), `persona created from recipe (backend=${backend}, model=${modelID ?? modelGroup})`);
       actualCwd = wt.worktreePath;
       isolated = true;
       worktreeBranch = wt.branch;
@@ -806,7 +806,7 @@ async function createPersonaFromRecipe({ backend, providerID, modelID, modelGrou
     let isolated = false;
     let worktreeBranch = null;
     if (isGitRepo(workspaceDir)) {
-      const wt = createIsolatedWorktree(workspaceDir, name, id);
+      const wt = createIsolatedWorktree(workspaceDir, name, id, `persona created from recipe (backend=${backend}, model=${modelID ?? modelGroup})`);
       actualCwd = wt.worktreePath;
       isolated = true;
       worktreeBranch = wt.branch;
@@ -1204,7 +1204,11 @@ app.delete("/api/personas/:id", async (req, res) => {
     // leave a phone-controllable session running in a just-removed worktree.
     if (persona.handoff) stopRemoteControl(persona.handoff.pid);
     if (persona.isolated) {
-      removeWorktreeAndBranch(persona.workspaceDir, persona.actualCwd, persona.worktreeBranch);
+      removeWorktreeAndBranch(persona.workspaceDir, persona.actualCwd, persona.worktreeBranch, {
+        personaId: persona.id,
+        personaName: persona.name,
+        reason: "persona deleted (claude-code)",
+      });
     }
   } else {
     try {
@@ -1214,7 +1218,11 @@ app.delete("/api/personas/:id", async (req, res) => {
       console.error(`[delete] failed to delete OpenCode session ${persona.sessionID}:`, err.message);
     }
     if (persona.isolated) {
-      removeWorktreeAndBranch(persona.workspaceDir, persona.actualCwd, persona.worktreeBranch);
+      removeWorktreeAndBranch(persona.workspaceDir, persona.actualCwd, persona.worktreeBranch, {
+        personaId: persona.id,
+        personaName: persona.name,
+        reason: "persona deleted (api)",
+      });
     }
   }
 
