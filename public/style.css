@@ -153,6 +153,11 @@ body {
    blocked (red - needs input) because nothing is being asked of Brian here.
    symposion-policy.md T0-2 - see STALL_VISIBLE_MS in app.js. */
 .activity-dot.stalled { background: #ff9f0a; }
+/* Last turn failed at the transport level and nothing has succeeded since
+   (symposion-I103). Red like `blocked` because both need attention, but hollow
+   rather than filled: blocked is waiting ON Brian, this one already gave up.
+   Not pulsing - nothing is in progress. */
+.activity-dot.failed { background: transparent; box-shadow: inset 0 0 0 2px #ff453a; }
 /* Turn finished while Brian wasn't watching this persona - "come look",
    distinct from both the pulsing-blue working dot and the static-grey idle
    one it would otherwise be indistinguishable from once a turn completes. */
