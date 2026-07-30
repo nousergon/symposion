@@ -156,10 +156,40 @@ export function saveAttachment(personaId, { filename, mime, base64 }) {
  * path separator, so there's nothing to traverse out of ATTACHMENTS_DIR with.
  */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Join `segments` under `baseDir` and return the path ONLY if it genuinely
+ * lands inside it - otherwise null.
+ *
+ * The UUID check above already makes traversal impossible, since an anchored
+ * `^[0-9a-f-]{36}$` cannot contain a separator or a dot. This is the second
+ * lock, and it is worth having for two independent reasons:
+ *
+ *  - It is structural rather than lexical. It stays correct if someone later
+ *    relaxes the id format, adds a caller that forgets the regex, or passes a
+ *    segment from a new source - none of which the regex would survive.
+ *  - It is checkable. CodeQL flagged the regex-guarded joins below as
+ *    uncontrolled path expressions because it cannot see a regex as a
+ *    sanitizer, and "the analyzer is wrong" is not a fix: a suppressed alert
+ *    and a real one look identical six months later.
+ *
+ * Applied to attachments as well as archives - same defect class, and fixing
+ * only the instance CodeQL happened to flag would leave the class open.
+ */
+function resolveWithin(baseDir, ...segments) {
+  if (segments.some((s) => typeof s !== "string" || !s)) return null;
+  const base = path.resolve(baseDir);
+  const resolved = path.resolve(base, ...segments);
+  // The separator suffix matters: without it, `/data/archives-evil` passes a
+  // naive startsWith check against `/data/archives`.
+  if (resolved !== base && !resolved.startsWith(base + path.sep)) return null;
+  return resolved;
+}
+
 export function attachmentFilePath(personaId, id) {
   if (!UUID_RE.test(id)) return null;
-  const filePath = path.join(ATTACHMENTS_DIR, personaId, id);
-  return fs.existsSync(filePath) ? filePath : null;
+  const filePath = resolveWithin(ATTACHMENTS_DIR, personaId, id);
+  return filePath && fs.existsSync(filePath) ? filePath : null;
 }
 
 /**
@@ -177,7 +207,8 @@ export function attachmentFilePath(personaId, id) {
  */
 export function archiveTranscript(personaId, messages, meta = {}) {
   const id = randomUUID();
-  const dir = path.join(ARCHIVES_DIR, personaId);
+  const dir = resolveWithin(ARCHIVES_DIR, personaId);
+  if (!dir) throw new Error(`refusing to archive outside the archives directory: ${personaId}`);
   fs.mkdirSync(dir, { recursive: true });
   const record = {
     id,
@@ -194,8 +225,8 @@ export function archiveTranscript(personaId, messages, meta = {}) {
 /** Read one archived transcript back, or null if the id is unknown/bogus. */
 export function loadArchive(personaId, id) {
   if (!UUID_RE.test(id) || !UUID_RE.test(personaId)) return null;
-  const filePath = path.join(ARCHIVES_DIR, personaId, `${id}.json`);
-  if (!fs.existsSync(filePath)) return null;
+  const filePath = resolveWithin(ARCHIVES_DIR, personaId, `${id}.json`);
+  if (!filePath || !fs.existsSync(filePath)) return null;
   try {
     return JSON.parse(fs.readFileSync(filePath, "utf8"));
   } catch {
@@ -208,7 +239,12 @@ export function loadArchive(personaId, id) {
 /** Delete every archive for a persona - called when the persona itself goes. */
 export function removeArchives(personaId) {
   if (!UUID_RE.test(personaId)) return;
-  fs.rmSync(path.join(ARCHIVES_DIR, personaId), { recursive: true, force: true });
+  const dir = resolveWithin(ARCHIVES_DIR, personaId);
+  // A recursive force-delete is the one call here where a path escaping its
+  // base would be destructive rather than merely wrong, so it gets the
+  // strictest treatment: no path, no call.
+  if (!dir) return;
+  fs.rmSync(dir, { recursive: true, force: true });
 }
 
 /** Strip a live persona object down to the plain-data fields worth persisting. */

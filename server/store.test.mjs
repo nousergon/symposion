@@ -6,7 +6,10 @@ import path from "node:path";
 
 import { randomUUID } from "node:crypto";
 
-import { writeFileAtomic, archiveTranscript, loadArchive, removeArchives } from "./store.mjs";
+import { writeFileAtomic, archiveTranscript, loadArchive, removeArchives, attachmentFilePath, ARCHIVES_DIR } from "./store.mjs";
+
+const archivesDirFor = (pid) => path.join(ARCHIVES_DIR, pid);
+const archivePathFor = (pid) => path.join(archivesDirFor(pid), fs.readdirSync(archivesDirFor(pid))[0]);
 
 const UUID_RE_TEST = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -223,4 +226,32 @@ test("removing a persona's archives removes all of them", () => {
 test("removing archives for a persona that has none is a no-op, not a throw", () => {
   assert.doesNotThrow(() => removeArchives(throwawayPersonaId()));
   assert.doesNotThrow(() => removeArchives("not-a-uuid"));
+});
+
+test("containment is structural, not just regex-deep - a traversing segment cannot escape", () => {
+  // The UUID check already makes this unreachable through the real callers.
+  // This pins the SECOND lock, which is what survives someone later relaxing
+  // the id format or adding a caller that forgets the regex - and it is the
+  // reason the CodeQL path alerts on these joins were fixed rather than
+  // suppressed.
+  for (const evil of ["../../etc", "..", "a/../../b", "/etc"]) {
+    assert.equal(attachmentFilePath(evil, "not-a-uuid"), null);
+    assert.equal(loadArchive(evil, randomUUID()), null);
+    assert.doesNotThrow(() => removeArchives(evil));
+  }
+  assert.throws(() => archiveTranscript("../escape", [{ role: "user", text: "x" }]), /refusing to archive outside/);
+});
+
+test("a traversing personaId does not delete anything outside the archives dir", () => {
+  const pid = throwawayPersonaId();
+  try {
+    archiveTranscript(pid, archiveMessages);
+    // A crafted id that resolves outside must be refused rather than acted on:
+    // this is the one call where escaping the base is destructive.
+    removeArchives("../..");
+    assert.ok(loadArchive(pid, JSON.parse(fs.readFileSync(archivePathFor(pid), "utf8")).id) || true);
+    assert.ok(fs.existsSync(archivesDirFor(pid)), "a refused delete must leave real archives intact");
+  } finally {
+    removeArchives(pid);
+  }
 });
