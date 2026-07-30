@@ -1,0 +1,842 @@
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #1c1c1e;
+  color: #eaeaea;
+  height: 100vh;
+}
+.layout { display: flex; height: 100vh; }
+
+.sidebar {
+  width: 260px;
+  background: #17171a;
+  border-right: 1px solid #2c2c2e;
+  display: flex;
+  flex-direction: column;
+}
+.sidebar-header {
+  padding: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #2c2c2e;
+}
+.brand { font-weight: 600; font-size: 15px; letter-spacing: 0.02em; }
+.header-actions { display: flex; align-items: center; gap: 6px; }
+.icon-btn {
+  background: #3a3a3c; color: #fff; border: none; border-radius: 6px;
+  width: 26px; height: 26px; cursor: pointer; font-size: 14px; line-height: 1;
+  display: flex; align-items: center; justify-content: center;
+}
+.icon-btn:hover:not(:disabled) { background: #48484a; }
+.icon-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.icon-btn.spinning { animation: icon-btn-spin 0.8s linear infinite; }
+@keyframes icon-btn-spin {
+  to { transform: rotate(360deg); }
+}
+#new-agent-btn {
+  background: #3a3a3c;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+#new-agent-btn:hover { background: #48484a; }
+
+/* Quick Agents: one-click chip presets for recurring backend/model recipes. */
+.quick-agents-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 0 10px 10px;
+}
+.quick-agent-chip {
+  background: #2c2c2e;
+  border: none;
+  border-radius: 14px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: #e5e5e5;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.quick-agent-chip:hover { background: #3a3a3c; }
+.quick-agent-chip:disabled { opacity: 0.5; cursor: default; }
+.quick-agent-chip.manage { font-size: 14px; padding: 4px 8px; }
+
+/* Quick Agents manage modal list */
+.manage-qa-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid #3a3a3c;
+}
+.manage-qa-row:last-child { border-bottom: none; }
+.manage-qa-label { flex: 1; font-size: 14px; color: #e5e5e5; }
+
+#persona-list { list-style: none; margin: 0; padding: 8px; flex: 1; overflow-y: auto; }
+.persona-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  margin-bottom: 4px;
+}
+.persona-item:hover { background: #2c2c2e; }
+.persona-item.active { background: #34343a; }
+.persona-name-block { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.persona-name { font-size: 13px; }
+.persona-model { font-size: 10px; color: #9a9a9e; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.persona-status {
+  font-size: 10px; font-weight: 600; color: #5ac8fa;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.persona-status.ready { color: #34c759; }
+.ttl-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.ttl-dot.green { background: #34c759; }
+.ttl-dot.yellow { background: #ffd60a; }
+.ttl-dot.red { background: #ff453a; }
+.ttl-label { font-size: 10px; color: #9a9a9e; }
+.activity-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.activity-dot.idle { background: #5a5a5e; }
+.activity-dot.working { background: #0a84ff; animation: activity-pulse 1.2s ease-in-out infinite; }
+.activity-dot.blocked { background: #ff453a; }
+/* Context occupancy on the persona row. Neutral until it matters: the number
+   is useful at a glance long before it is a problem, so colouring it from the
+   start would train the eye to ignore the colour. */
+.context-usage { color: #8a8a8e; }
+.context-usage.notice { color: #8a8a8e; }
+.context-usage.advise { color: #ff9f0a; }
+.context-usage.urgent { color: #ff453a; font-weight: 600; }
+
+/* The context/cache advisory under the chat header. Only ever rendered when
+   the server decided there is something worth saying - see assessContext(). */
+.context-advice-slot:empty { display: none; }
+.context-advice {
+  margin-top: 6px; padding: 6px 10px; border-radius: 6px;
+  font-size: 12px; line-height: 1.45;
+}
+.context-advice.advise { background: #ff9f0a1a; border: 1px solid #ff9f0a44; color: #ffca7a; }
+/* The action lives inside the advice, not somewhere the reader has to go
+   find: an advisory whose recommended action is awkward to reach is one that
+   gets ignored (symposion-I107). */
+.advice-action {
+  display: inline-block; margin-left: 8px; padding: 2px 8px;
+  border-radius: 4px; border: 1px solid currentColor; background: transparent;
+  color: inherit; font: inherit; font-size: 11px; cursor: pointer;
+}
+.advice-action:hover { background: #ffffff14; }
+
+/* Archived sessions - deliberately quiet. History is available, not on offer. */
+.archives-slot:empty { display: none; }
+.archives-toggle, .archive-back {
+  margin-top: 6px; padding: 0; border: none; background: none;
+  color: #8a8a8e; font: inherit; font-size: 12px; cursor: pointer; text-decoration: underline;
+}
+.archives-body { margin-top: 4px; max-height: 320px; overflow-y: auto; font-size: 12px; }
+.archive-row { padding: 2px 0; }
+.archive-open { border: none; background: none; color: #0a84ff; font: inherit; font-size: 12px; cursor: pointer; padding: 0; }
+.archive-meta { color: #6a6a6e; }
+.archive-msg { padding: 4px 0; border-bottom: 1px solid #ffffff0f; white-space: pre-wrap; color: #b4b4b8; }
+.archive-msg.user { color: #8a8a8e; }
+.context-advice.urgent { background: #ff453a1a; border: 1px solid #ff453a55; color: #ff9a91; }
+
+/* A turn that is in flight but has produced no output for a while. Amber and
+   NOT pulsing: the pulse is what reads as "actively producing", and this is
+   precisely the state where that reassurance is unearned. Distinct from
+   blocked (red - needs input) because nothing is being asked of Brian here.
+   symposion-policy.md T0-2 - see STALL_VISIBLE_MS in app.js. */
+.activity-dot.stalled { background: #ff9f0a; }
+/* Last turn failed at the transport level and nothing has succeeded since
+   (symposion-I103). Red like `blocked` because both need attention, but hollow
+   rather than filled: blocked is waiting ON Brian, this one already gave up.
+   Not pulsing - nothing is in progress. */
+.activity-dot.failed { background: transparent; box-shadow: inset 0 0 0 2px #ff453a; }
+/* Turn finished while Brian wasn't watching this persona - "come look",
+   distinct from both the pulsing-blue working dot and the static-grey idle
+   one it would otherwise be indistinguishable from once a turn completes. */
+.activity-dot.ready { background: #34c759; }
+.persona-item.ready-for-review { border: 1px solid #34c75955; }
+.ready-flag { color: #34c759; font-size: 12px; margin-right: 4px; }
+
+/* A detached background dispatch (symposion-I45) is orthogonal to
+   activity-dot (foreground pendingTurn only) - shown alongside it, not
+   instead of it, since a persona can be idle in the foreground while a
+   background task is still running. */
+.background-dot { width: 7px; height: 7px; border-radius: 3px; flex-shrink: 0; background: #bf5af2; animation: activity-pulse 1.2s ease-in-out infinite; }
+@keyframes activity-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.persona-delete, .persona-rename {
+  background: none; border: none; color: #6a6a6e; font-size: 14px;
+  line-height: 1; cursor: pointer; padding: 2px 6px; border-radius: 4px;
+  visibility: hidden;
+}
+.persona-delete { font-size: 16px; }
+.persona-item:hover .persona-delete, .persona-item:hover .persona-rename { visibility: visible; }
+.persona-delete:hover { color: #ff453a; background: #3a3a3c; }
+.persona-rename:hover { color: #eaeaea; background: #3a3a3c; }
+
+.chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.chat-header {
+  padding: 14px 20px;
+  border-bottom: 1px solid #2c2c2e;
+  font-size: 14px;
+  color: #b0b0b5;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+.chat-header-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.chat-header-title { display: flex; align-items: center; gap: 6px; min-width: 0; overflow: hidden; }
+.chat-summary {
+  font-size: 12px;
+  color: #8a8a8f;
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chat-summary[hidden] { display: none; }
+#chat-header-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.handoff-btn {
+  background: #3a3a3c; color: #fff; border: none; border-radius: 6px;
+  padding: 6px 10px; cursor: pointer; font-size: 12px; flex-shrink: 0;
+}
+.handoff-btn:hover:not(:disabled) { background: #48484a; }
+.handoff-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+.handoff-flag { margin-right: 4px; }
+
+.handoff-card {
+  margin: 0 14px 10px 14px;
+  border: 1px solid #0a84ff66;
+  background: #0a84ff14;
+  border-radius: 10px;
+  padding: 12px 14px;
+  font-size: 13px;
+}
+.handoff-card[hidden] { display: none; }
+.handoff-card-title { font-weight: 600; margin-bottom: 10px; }
+.handoff-dead { color: #ff453a; font-weight: 400; font-size: 12px; }
+.handoff-card-body { display: flex; gap: 14px; align-items: flex-start; }
+.handoff-qr { width: 132px; height: 132px; border-radius: 8px; background: #fff; padding: 4px; flex-shrink: 0; }
+.handoff-card-detail { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.handoff-card-detail a { color: #64a8ff; word-break: break-all; font-size: 12px; }
+.handoff-hint { color: #9a9a9e; font-size: 11px; }
+.handoff-card-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+.msg.via-remote { border: 1px dashed #0a84ff55; }
+.chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; }
+.msg { max-width: 60%; padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.4; white-space: pre-wrap; overflow-wrap: break-word; }
+.msg.user { align-self: flex-end; background: #0a84ff; color: white; }
+.msg.assistant { align-self: flex-start; background: #2c2c2e; color: #eaeaea; }
+
+.chat-input { display: flex; align-items: flex-end; gap: 8px; padding: 14px; border-top: 1px solid #2c2c2e; }
+.chat-input textarea {
+  flex: 1;
+  background: #2c2c2e;
+  border: 1px solid #3a3a3c;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: white;
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 1.4;
+  resize: none;
+  overflow-y: auto;
+  max-height: 200px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+.chat-input button {
+  background: #0a84ff;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 18px;
+  cursor: pointer;
+}
+.chat-input button:disabled, .chat-input textarea:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.modal-backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center;
+}
+.modal-backdrop[hidden] { display: none; }
+.modal {
+  background: #232326; border-radius: 12px; padding: 20px; width: 320px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.modal h3 { margin: 0 0 8px 0; font-size: 15px; }
+.modal label { font-size: 11px; color: #9a9a9e; margin-top: 6px; }
+.modal input, .modal select {
+  background: #2c2c2e; border: 1px solid #3a3a3c; border-radius: 6px;
+  padding: 8px 10px; color: white; font-size: 13px;
+}
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+.modal-actions button {
+  background: #3a3a3c; color: white; border: none; border-radius: 6px;
+  padding: 8px 14px; cursor: pointer; font-size: 13px;
+}
+#new-agent-create { background: #0a84ff; }
+
+.workspace-picker-row { display: flex; gap: 6px; }
+.workspace-picker-row input { flex: 1; min-width: 0; }
+.workspace-picker-row button {
+  background: #3a3a3c; color: white; border: none; border-radius: 6px;
+  padding: 8px 12px; cursor: pointer; font-size: 12px; white-space: nowrap;
+}
+.workspace-picker-row button:hover { background: #48484a; }
+
+.name-picker-row { display: flex; gap: 6px; }
+.name-picker-row input { flex: 1; min-width: 0; }
+.name-picker-row .icon-btn { width: auto; padding: 0 10px; flex-shrink: 0; }
+
+.modal.dir-browser { width: 440px; }
+.dir-browser-path {
+  font-size: 11px; color: #9a9a9e; font-family: monospace;
+  padding: 6px 0; word-break: break-all;
+}
+.dir-browser-list {
+  list-style: none; margin: 0; padding: 0; max-height: 280px; overflow-y: auto;
+  border: 1px solid #3a3a3c; border-radius: 6px;
+}
+.dir-browser-item {
+  padding: 8px 10px; font-size: 13px; cursor: pointer; border-bottom: 1px solid #2c2c2e;
+}
+.dir-browser-item:last-child { border-bottom: none; }
+.dir-browser-item:hover { background: #2c2c2e; }
+.dir-browser-item.dir-browser-up { color: #9a9a9e; }
+
+.backend-toggle { display: flex; gap: 6px; }
+.backend-btn {
+  flex: 1; background: #2c2c2e; color: #aeaeb2; border: 1px solid #3a3a3c;
+  border-radius: 6px; padding: 8px; cursor: pointer; font-size: 12px;
+}
+.backend-btn.active { background: #0a84ff; color: white; border-color: #0a84ff; }
+
+.persona-item.blocked { border: 1px solid #ff453a55; }
+.blocked-flag { color: #ff453a; font-size: 12px; margin-right: 4px; }
+.msg.assistant.blocked { border: 1px solid #ff453a; }
+
+.msg.assistant.error {
+  background: #3a1a1a; color: #ff9b96; border: 1px solid #ff453a88;
+}
+/* Reconnection indicator during an SSE drop — transient visual pulse to
+   show the chat isn't frozen while EventSource reconnects behind the scenes. */
+.msg.assistant.reconnecting::after {
+  content: " · reconnecting…";
+  color: #ff9b96;
+  font-size: 11px;
+  animation: thinking-bounce 1.2s infinite ease-in-out;
+}
+
+.msg.assistant.thinking { display: flex; gap: 4px; align-items: center; padding: 14px; }
+.msg.assistant.thinking span {
+  width: 7px; height: 7px; border-radius: 50%; background: #9a9a9e;
+  animation: thinking-bounce 1.2s infinite ease-in-out;
+}
+.msg.assistant.thinking span:nth-child(2) { animation-delay: 0.15s; }
+.msg.assistant.thinking span:nth-child(3) { animation-delay: 0.3s; }
+@keyframes thinking-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.5; }
+  30% { transform: translateY(-4px); opacity: 1; }
+}
+
+.blocked-card {
+  margin: 0 14px; padding: 14px; background: #2a1f1f;
+  border: 1px solid #ff453a; border-radius: 10px;
+  display: flex; flex-direction: column; gap: 8px;
+  animation: blocked-card-in 0.16s ease-out;
+}
+.blocked-card[hidden] { display: none; }
+@keyframes blocked-card-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+/* A question is the agent asking for input, not a risk gate - it gets the
+   neutral accent (matching .blocked-option.selected/.backend-btn.active)
+   rather than the permission card's alarm red, so the UI doesn't cry wolf
+   on an ordinary clarifying question. */
+.blocked-card.is-question { background: #1a2230; border-color: #0a84ff66; }
+.blocked-card-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 50%; font-size: 10px; font-weight: 700;
+  margin-right: 4px; vertical-align: -2px;
+}
+.is-permission .blocked-card-icon { color: #ff453a; }
+.blocked-card-icon-question { background: #0a84ff; color: white; }
+.blocked-card-title { font-size: 13px; font-weight: 600; color: #eaeaea; }
+.is-permission .blocked-card-title { color: #ff453a; }
+.blocked-card-detail { font-size: 13px; color: #eaeaea; }
+.blocked-card-detail code { background: #3a3a3c; padding: 1px 5px; border-radius: 4px; word-break: break-all; }
+.blocked-card-resource { font-size: 11px; color: #b0b0b5; font-family: monospace; padding-left: 8px; word-break: break-all; }
+.blocked-card-progress { font-size: 10px; font-weight: 600; letter-spacing: 0.03em; text-transform: uppercase; color: #6ea8ff; }
+.blocked-card-question-text { font-size: 13px; color: #eaeaea; margin-bottom: 4px; }
+.blocked-card-question { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; border-top: 1px solid #3a3a3c22; }
+.blocked-card-question:first-of-type { border-top: none; }
+.blocked-card-options { display: flex; flex-direction: column; gap: 6px; }
+.blocked-option {
+  display: flex; align-items: flex-start; gap: 8px;
+  width: 100%; text-align: left;
+  background: #232734; color: #eaeaea; border: 1px solid #3a4152;
+  border-radius: 8px; padding: 8px 10px; cursor: pointer; font-size: 12px;
+  font-family: inherit; transition: background 0.1s, border-color 0.1s;
+}
+.blocked-option:hover { background: #2c3242; border-color: #4a5266; }
+.blocked-option.selected { background: #0a84ff22; border-color: #0a84ff; }
+.blocked-option-mark {
+  flex: 0 0 auto; width: 14px; height: 14px; margin-top: 1px;
+  border: 1.5px solid #6a7488; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+}
+.blocked-card-options.is-multi .blocked-option-mark { border-radius: 4px; }
+.blocked-option.selected .blocked-option-mark { border-color: #0a84ff; background: #0a84ff; }
+.blocked-option.selected .blocked-option-mark::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: white; }
+.blocked-card-options.is-multi .blocked-option.selected .blocked-option-mark::after { border-radius: 1px; }
+.blocked-option-body { display: flex; flex-direction: column; gap: 2px; flex: 1 1 auto; min-width: 0; }
+.blocked-option-label { font-size: 12px; color: #eaeaea; }
+.blocked-option-desc { font-size: 11px; color: #9a9a9e; }
+.blocked-option-key {
+  flex: 0 0 auto; font-size: 10px; color: #7a8290; border: 1px solid #3a4152;
+  border-radius: 4px; padding: 1px 5px; font-family: monospace;
+}
+.blocked-option-custom { padding: 6px 10px; }
+.blocked-option-custom .blocked-option-mark { display: none; }
+.blocked-card-custom {
+  flex: 1 1 auto; background: transparent; border: none; outline: none;
+  color: white; font-size: 12px; font-family: inherit;
+}
+.blocked-card-custom::placeholder { color: #7a8290; }
+.blocked-card-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+
+.background-task-card {
+  margin: 0 14px 10px 14px;
+  border: 1px solid #bf5af266;
+  background: #bf5af214;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+}
+.background-task-card[hidden] { display: none; }
+.background-card-title { font-weight: 600; color: #d9a6ff; }
+.background-task-card .live-tools { border-top-color: #bf5af233; }
+.blocked-btn {
+  background: #3a3a3c; color: white; border: none; border-radius: 6px;
+  padding: 8px 14px; cursor: pointer; font-size: 12px;
+}
+.blocked-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.blocked-btn.allow { background: #34c759; }
+.blocked-btn.deny { background: #ff453a; }
+/* Question footer: Submit/Skip aren't an allow/deny risk decision, so they
+   get a neutral primary/ghost treatment instead of the green/red pair. */
+.blocked-btn.primary { background: #0a84ff; }
+.blocked-btn.ghost { background: transparent; border: 1px solid #4a4a4c; color: #b0b0b5; }
+.blocked-btn.ghost:hover:not(:disabled) { background: #ffffff0d; color: #eaeaea; }
+
+.msg-cost { margin-top: 6px; font-size: 10px; color: #9a9a9e; opacity: 0.8; }
+
+.tool-parts, .live-tools {
+  margin-top: 8px; padding-top: 6px; border-top: 1px solid #ffffff22;
+  font-size: 11px;
+}
+.tool-parts > summary, .live-tools > summary { cursor: pointer; color: #9a9a9e; }
+.tool-parts > summary:hover, .live-tools > summary:hover { color: #eaeaea; }
+.tool-parts[open] > summary, .live-tools[open] > summary { margin-bottom: 6px; }
+
+/* Row container for both the live (streaming) and finished tool-call lists -
+   capped + scrollable once open so a long fan-out (dozens of calls) can't
+   balloon the message bubble; the outer <details> being collapsed by
+   default is what "minimizes" the list, this cap handles the case where
+   it's expanded. */
+.tool-rows { display: flex; flex-direction: column; gap: 4px; }
+.tool-parts[open] > .tool-rows, .live-tools[open] > .tool-rows {
+  max-height: 320px; overflow-y: auto;
+}
+
+/* Per-call row: a <details> so each one expands independently to show its
+   full untruncated input/output (previously the label was hard-truncated
+   with no way to see the rest). Shared by live rows and finished rows. */
+.live-tool-entry {
+  font-size: 11px; color: #b0b0b5;
+}
+.live-tool-entry > summary { cursor: pointer; }
+.live-tool-entry.tool-part-entry {
+  padding: 2px 8px; background: #00000022; border-radius: 6px;
+  border-left: 2px solid #6a6a6e;
+}
+.live-tool-entry.tool-part-entry.error { border-left-color: #ff453a; }
+.tool-row {
+  display: flex; align-items: center; gap: 7px;
+}
+.live-tool-label {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.live-tool-entry[open] .live-tool-label {
+  white-space: normal; word-break: break-word;
+}
+.live-tool-dot {
+  flex: none; width: 8px; height: 8px; border-radius: 50%;
+  border: 1.5px solid #6a6a6e; box-sizing: border-box;
+}
+.live-tool-entry.running .live-tool-dot {
+  border-color: #0a84ff; border-top-color: transparent;
+  animation: live-tool-spin 0.7s linear infinite;
+}
+.live-tool-entry.running .live-tool-label { color: #eaeaea; }
+.live-tool-entry.done .live-tool-dot { background: #34c759; border-color: #34c759; }
+.live-tool-entry.error .live-tool-dot { background: #ff453a; border-color: #ff453a; }
+.live-tool-entry.error .live-tool-label { color: #ff9b96; }
+@keyframes live-tool-spin {
+  to { transform: rotate(360deg); }
+}
+
+.tool-part-input, .tool-part-output {
+  margin: 4px 0 0 0; white-space: pre-wrap; word-break: break-word;
+  font-size: 10px; color: #b0b0b5; font-family: monospace;
+  max-height: 200px; overflow-y: auto;
+}
+.tool-part-output { color: #9a9a9e; border-top: 1px dashed #3a3a3c; padding-top: 4px; }
+.live-tool-entry.error .tool-part-output { color: #ff9b96; }
+
+.msg-text:empty { display: none; }
+
+/* .msg-text renders marked's HTML output, which is block-level (p, table,
+   pre, ul...) with real markup between tags - the pre-wrap inherited from
+   .msg above (kept for the plain-text thinking/attachment bits) would treat
+   marked's own inter-tag newlines as literal blank lines, so it's reset back
+   to normal here and paragraph/list spacing is handled with margins instead. */
+.msg-text { white-space: normal; }
+.msg-text p { margin: 0 0 8px; }
+.msg-text p:last-child { margin-bottom: 0; }
+.msg-text ul, .msg-text ol { margin: 4px 0 8px; padding-left: 20px; }
+.msg-text li { margin: 2px 0; }
+.msg-text li:last-child { margin-bottom: 0; }
+.msg-text blockquote { margin: 4px 0; padding-left: 10px; border-left: 2px solid #ffffff33; opacity: 0.85; }
+.msg-text h1, .msg-text h2, .msg-text h3, .msg-text h4 { margin: 8px 0 6px; line-height: 1.25; }
+.msg-text h1:first-child, .msg-text h2:first-child, .msg-text h3:first-child, .msg-text h4:first-child { margin-top: 0; }
+.msg-text hr { border: none; border-top: 1px solid #ffffff22; margin: 10px 0; }
+.msg-text a { color: #6ea8ff; }
+.msg.user .msg-text a { color: #ffffff; text-decoration: underline; }
+.msg-text code { background: #ffffff1a; padding: 1px 5px; border-radius: 4px; font-family: monospace; font-size: 0.9em; }
+.msg-text pre { background: #1c1c1e; border: 1px solid #3a3a3c; border-radius: 8px; padding: 10px; margin: 4px 0 8px; overflow-x: auto; }
+.msg-text pre code { background: none; padding: 0; }
+.msg-text table { border-collapse: collapse; margin: 4px 0 8px; font-size: 13px; max-width: 100%; display: block; overflow-x: auto; }
+.msg-text th, .msg-text td { border: 1px solid #ffffff2a; padding: 4px 8px; text-align: left; }
+.msg-text th { background: #ffffff11; }
+
+/* Subagent (Agent tool) dispatches get their own accent so they read as
+   "a subagent is working" rather than a generic tool call - the CLI gives no
+   visibility into the subagent's own steps, so this + the elapsed timer in
+   its label (toolLiveLabel) is the clearest signal available. */
+.live-tool-entry.agent .live-tool-dot { border-radius: 3px; }
+.live-tool-entry.agent.running .live-tool-dot {
+  border-color: #bf5af2; border-top-color: transparent;
+}
+.live-tool-entry.agent.running .live-tool-label { color: #d9a6ff; }
+.live-tool-entry.agent.done .live-tool-dot { background: #bf5af2; border-color: #bf5af2; }
+
+.attach-btn {
+  background: #2c2c2e; color: #aeaeb2; border: 1px solid #3a3a3c;
+  border-radius: 8px; padding: 10px 12px; cursor: pointer; font-size: 15px; line-height: 1;
+}
+.attach-btn:hover:not(:disabled) { background: #3a3a3c; }
+.attach-btn.recording { background: #ff453a; color: #fff; border-color: #ff453a; animation: mic-pulse 1.2s ease-in-out infinite; }
+@keyframes mic-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.staged-attachments {
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 0 14px 10px 14px;
+}
+.staged-attachments[hidden] { display: none; }
+.attachment-chip {
+  display: flex; align-items: center; gap: 6px;
+  background: #2c2c2e; border: 1px solid #3a3a3c; border-radius: 6px;
+  padding: 4px 6px 4px 10px; font-size: 11px; color: #eaeaea;
+}
+.attachment-chip-size { color: #9a9a9e; }
+.attachment-chip-remove {
+  background: none; border: none; color: #9a9a9e; font-size: 14px;
+  line-height: 1; cursor: pointer; padding: 2px 4px; border-radius: 4px;
+}
+.attachment-chip-remove:hover { color: #ff453a; background: #3a3a3c; }
+
+.chat-messages.drag-over { outline: 2px dashed #0a84ff; outline-offset: -8px; }
+
+.msg-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.msg-attachment-thumb {
+  max-width: 180px; max-height: 180px; border-radius: 8px; display: block;
+}
+.msg-attachment-file {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: #00000022; border-radius: 6px; padding: 6px 10px;
+  font-size: 12px; color: inherit; text-decoration: none;
+}
+.msg.user .msg-attachment-file { background: #ffffff22; }
+.msg-attachment-file:hover { text-decoration: underline; }
+
+/* ── Decision Queue Triage ── */
+
+.sidebar-section {
+  padding: 8px 10px;
+  border-bottom: 1px solid #2c2c2e;
+}
+.sidebar-action {
+  width: 100%;
+  background: #2c2c2e;
+  color: #eaeaea;
+  border: 1px solid #3a3a3c;
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  text-align: left;
+  transition: background 0.1s;
+}
+.sidebar-action:hover { background: #3a3a3c; }
+.sidebar-action.active { background: #0a84ff22; border-color: #0a84ff; color: #6ea8ff; }
+
+.triage-summary {
+  padding: 4px 14px 8px;
+  font-size: 10px;
+  color: #6a6a6e;
+  font-family: monospace;
+  letter-spacing: 0.03em;
+}
+.triage-view {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.triage-view[hidden] { display: none; }
+
+.triage-card {
+  width: 100%;
+  max-width: 680px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.triage-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.triage-card-number {
+  font-size: 11px;
+  font-weight: 600;
+  color: #6ea8ff;
+  font-family: monospace;
+  letter-spacing: 0.02em;
+}
+.triage-card-badges { display: flex; gap: 4px; }
+.triage-badge {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.triage-badge.priority { background: #ff453a22; color: #ff453a; border: 1px solid #ff453a44; }
+.triage-badge.complexity { background: #bf5af222; color: #d9a6ff; border: 1px solid #bf5af244; }
+.triage-badge.gate { background: #ffd60a22; color: #ffd60a; border: 1px solid #ffd60a44; }
+.triage-badge.pr { background: #34c75922; color: #34c759; border: 1px solid #34c75944; }
+
+.triage-card-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: #eaeaea;
+  line-height: 1.3;
+}
+
+.triage-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  background: #232326;
+  border: 1px solid #3a3a3c;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #b0b0b5;
+}
+.triage-label {
+  font-weight: 600;
+  color: #6ea8ff;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  display: block;
+  margin-bottom: 4px;
+}
+.triage-ask, .triage-recommendation, .triage-sota, .triage-delta, .triage-closes { color: #eaeaea; }
+
+.triage-recommendation {
+  border-left: 3px solid #0a84ff66;
+  padding-left: 12px;
+}
+
+.triage-sota {
+  border-left: 3px solid #34c75966;
+  padding-left: 12px;
+  background: #34c75908;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+.triage-delta {
+  border-left: 3px solid #ffd60a66;
+  padding-left: 12px;
+  background: #ffd60a08;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+.triage-meta {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-size: 11px;
+  color: #8a8a8f;
+  padding-top: 8px;
+  border-top: 1px solid #3a3a3c;
+}
+.triage-meta-link { color: #6ea8ff; text-decoration: none; }
+.triage-meta-link:hover { text-decoration: underline; }
+
+.triage-rulings {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.triage-ruling-btn {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: #232326;
+  color: #eaeaea;
+  border: 1px solid #3a3a3c;
+  border-radius: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+  transition: background 0.1s, border-color 0.1s;
+}
+.triage-ruling-btn:hover { background: #2c2c2e; border-color: #4a4a4c; }
+.triage-ruling-btn.selected { background: #0a84ff22; border-color: #0a84ff; }
+
+.triage-ruling-key {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: #7a8290;
+  border: 1px solid #3a4152;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-family: monospace;
+  line-height: 1.6;
+}
+.triage-ruling-btn.selected .triage-ruling-key { border-color: #0a84ff; color: #6ea8ff; }
+
+.triage-ruling-body { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+.triage-ruling-label { font-size: 13px; color: #eaeaea; }
+.triage-ruling-desc { font-size: 11px; color: #9a9a9e; }
+
+.triage-card-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.triage-progress {
+  font-size: 11px;
+  color: #6a6a6e;
+  font-family: monospace;
+}
+.triage-card-actions > div { display: flex; gap: 8px; }
+.triage-action-btn {
+  background: #3a3a3c;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 14px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+}
+.triage-action-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.triage-action-btn.submit { background: #0a84ff; }
+.triage-action-btn.submit:hover:not(:disabled) { background: #0a70e0; }
+.triage-action-btn.skip { background: transparent; border: 1px solid #4a4a4c; color: #b0b0b5; }
+.triage-action-btn.skip:hover { background: #ffffff0d; color: #eaeaea; }
+
+.triage-comment-area {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.triage-comment-area[hidden] { display: none; }
+.triage-comment-input {
+  background: #232326;
+  border: 1px solid #3a3a3c;
+  border-radius: 8px;
+  padding: 10px;
+  color: white;
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+  line-height: 1.4;
+}
+.triage-comment-input:focus { outline: none; border-color: #0a84ff; }
+
+.triage-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 60px 20px;
+  text-align: center;
+}
+.triage-empty-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: #34c75922;
+  color: #34c759;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  font-weight: 700;
+}
+.triage-empty-text { font-size: 14px; color: #9a9a9e; }
+.triage-close-btn {
+  background: #3a3a3c;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 20px;
+  cursor: pointer;
+  font-size: 13px;
+  font-family: inherit;
+}
+.triage-close-btn:hover { background: #48484a; }

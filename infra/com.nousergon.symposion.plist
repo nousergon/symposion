@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.nousergon.symposion</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/brianmcmahon/Development/symposion/server/index.mjs</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/brianmcmahon/Development/symposion</string>
+
+  <!-- Starts on login (RunAtLoad) and restarts unconditionally on any exit
+       (KeepAlive:true, not the SuccessfulExit-only variant) - a long-running
+       server has no legitimate "successful" exit, so any exit is a crash to
+       recover from. To actually stop it for good, use launchctl bootout, not
+       a plain kill/pkill - see infra/README.md. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/brianmcmahon/Library/Logs/symposion.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/brianmcmahon/Library/Logs/symposion.err.log</string>
+
+  <!-- Includes ~/.local/bin - confirmed live (2026-07-15) that claude lives
+       there, and this PATH not including it caused spawn("claude", ...) to
+       fail with ENOENT under launchd (worked fine in an interactive
+       terminal, where PATH is set by the shell profile instead). Belt-and-
+       suspenders alongside claude-code-backend.mjs's own direct-filesystem
+       binary resolution, which no longer depends on PATH at all for this. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/brianmcmahon/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <!-- Without this, EVERY server/secrets.mjs SSM lookup fails with "The
+         security token included in the request is invalid": a launchd agent
+         inherits none of the login shell's AWS environment. resolveSecret()
+         fails soft by design (a missing optional provider key means "skip that
+         provider", not a fatal boot), so the whole thing degraded to log lines
+         nobody reads — Web Push, xAI and Gemini were all silently unavailable
+         while their keys sat correctly in SSM. See symposion#54.
+         ne-laptop-agent is the laptop's MACHINE identity (IAM Roles Anywhere,
+         nous-ergon-ops/infrastructure/laptop-identity) — it does not expire, so
+         unlike the human SSO profile it cannot go quiet mid-session. It is also
+         deliberately narrower than the admin credential this replaced: expect
+         AccessDenied on a path nobody enumerated, and answer it with a codified
+         grant rather than a widening. -->
+    <key>AWS_PROFILE</key>
+    <string>ne-laptop-agent</string>
+    <key>AWS_REGION</key>
+    <string>us-east-1</string>
+  </dict>
+</dict>
+</plist>

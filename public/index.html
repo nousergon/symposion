@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>symposion</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <span class="brand">symposion</span>
+        <div class="header-actions">
+          <button type="button" id="restart-server-btn" class="icon-btn" title="Restart server (picks up latest deployed code)">↻</button>
+          <button id="new-agent-btn">+ New Agent</button>
+        </div>
+      </div>
+      <div class="sidebar-section">
+        <button type="button" id="triage-btn" class="sidebar-action" title="Open decision queue triage">📋 Decision Queue</button>
+      </div>
+      <div id="triage-summary" class="triage-summary" hidden></div>
+      <div id="quick-agents-row" class="quick-agents-row"></div>
+      <ul id="persona-list"></ul>
+    </aside>
+    <main class="chat">
+      <div class="chat-header" id="chat-header">
+        <div class="chat-header-row">
+          <span class="chat-header-title">
+            <span id="chat-header-text">Select or create an agent to begin</span>
+            <button type="button" id="rename-btn" class="icon-btn" title="Edit this agent (name/model)" hidden>✎</button>
+            <button type="button" id="reset-session-btn" class="icon-btn" title="Start a fresh session — keeps this agent, its worktree and its model, archives the transcript" hidden>⟳</button>
+          </span>
+          <button type="button" id="handoff-btn" class="handoff-btn" title="Hand this session off to Remote Control - continue it from the Claude mobile app or claude.ai/code" hidden>📱 Hand off</button>
+        </div>
+        <div class="chat-summary" id="chat-summary" hidden></div>
+        <!-- Context/cache advisory. Sits in the header rather than the message
+             list because it is a property of the SESSION, not of any one turn,
+             and because it has to stay visible while scrolled back. -->
+        <div class="context-advice-slot" id="context-advice"></div>
+        <!-- "N earlier sessions" - present only once a reset has happened, so
+             a shed transcript reads as archived rather than destroyed. -->
+        <div class="archives-slot" id="archives-slot"></div>
+      </div>
+      <div class="chat-messages" id="chat-messages"></div>
+      <div class="handoff-card" id="handoff-card" hidden></div>
+      <div class="blocked-card" id="blocked-card" hidden></div>
+      <div id="triage-view" class="triage-view" hidden></div>
+      <div class="background-task-card" id="background-task-card" hidden></div>
+      <div class="staged-attachments" id="staged-attachments" hidden></div>
+      <form class="chat-input" id="chat-form">
+        <input id="chat-file-input" type="file" multiple hidden />
+        <button type="button" id="chat-attach-btn" class="attach-btn" title="Attach files" disabled>📎</button>
+        <button type="button" id="chat-mic-btn" class="attach-btn" title="Dictate message" disabled hidden>🎤</button>
+        <textarea id="chat-text" rows="1" placeholder="Message this agent..." disabled></textarea>
+        <button type="submit" id="chat-send-btn" disabled>Send</button>
+      </form>
+    </main>
+  </div>
+
+  <div class="modal-backdrop" id="new-agent-modal" hidden>
+    <div class="modal">
+      <h3>New Agent</h3>
+      <label>Name</label>
+      <div class="name-picker-row">
+        <input id="new-agent-name" type="text" placeholder="Random star name" autocomplete="off" />
+        <button type="button" id="new-agent-randomize-name" class="icon-btn" title="Pick a different random name">🎲</button>
+      </div>
+      <label>Backend</label>
+      <div class="backend-toggle">
+        <button type="button" class="backend-btn active" data-backend="api">API</button>
+        <button type="button" class="backend-btn" data-backend="claude-code">Claude Code</button>
+      </div>
+      <label>Workspace</label>
+      <div class="workspace-picker-row">
+        <input id="new-agent-workspace" type="text" placeholder="/path/to/any/project" autocomplete="off" />
+        <button type="button" id="new-agent-browse-btn">Browse…</button>
+      </div>
+      <label id="new-agent-tier-label" hidden>Model tier</label>
+      <select id="new-agent-tier" hidden>
+        <option value="">Pick manually</option>
+      </select>
+      <label>Model</label>
+      <select id="new-agent-model"></select>
+      <label id="new-agent-permission-label" hidden>Permission policy</label>
+      <select id="new-agent-permission-mode" hidden></select>
+      <label id="new-agent-effort-label" hidden>Effort</label>
+      <select id="new-agent-effort-mode" hidden></select>
+      <div class="modal-actions">
+        <button type="button" id="new-agent-cancel">Cancel</button>
+        <button type="button" id="new-agent-save-quick">☆ Save as quick agent</button>
+        <button type="button" id="new-agent-create">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="edit-agent-modal" hidden>
+    <div class="modal">
+      <h3>Edit Agent</h3>
+      <label>Name</label>
+      <input id="edit-agent-name" type="text" autocomplete="off" />
+      <label>Model</label>
+      <select id="edit-agent-model"></select>
+      <label id="edit-agent-effort-label" hidden>Effort</label>
+      <select id="edit-agent-effort-mode" hidden></select>
+      <div class="modal-actions">
+        <button type="button" id="edit-agent-cancel">Cancel</button>
+        <button type="button" id="edit-agent-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="dir-browser-modal" hidden>
+    <div class="modal dir-browser">
+      <h3>Choose a workspace folder</h3>
+      <div class="dir-browser-path" id="dir-browser-path"></div>
+      <ul class="dir-browser-list" id="dir-browser-list"></ul>
+      <div class="modal-actions">
+        <button type="button" id="dir-browser-cancel">Cancel</button>
+        <button type="button" id="dir-browser-select">Select this folder</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="manage-quick-agents-modal" hidden>
+    <div class="modal">
+      <h3>Manage Quick Agents</h3>
+      <div id="manage-quick-agents-list"></div>
+      <div class="modal-actions">
+        <button type="button" id="manage-quick-agents-close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="vendor/marked.js"></script>
+  <script src="vendor/purify.min.js"></script>
+  <script src="dictation-policy.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,20 @@
+name: Gitleaks scan
+
+# Thin caller - all scan behavior lives in the reusable workflow. Edit it
+# there, not here: nousergon/nousergon-lib/.github/workflows/gitleaks-scan.yml
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * MON"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  gitleaks:
+    uses: nousergon/nousergon-lib/.github/workflows/gitleaks-scan.yml@main
+    secrets: inherit
