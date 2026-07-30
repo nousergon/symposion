@@ -78,13 +78,31 @@ test("a path that does not exist yet still resolves and is judged", () => {
   assert.equal(isWorkspaceAllowed("/nonexistent-root/deep", [DEV_ROOT]), false);
 });
 
+// These two deliberately do NOT reference ~/Development. An earlier version
+// asserted against `fs.realpathSync(DEV_ROOT)`, which passes on a machine that
+// happens to have that directory and fails everywhere else — CI caught it. The
+// home directory is the only path that can be assumed to exist.
 test("~ expands the way a shell would, since people type it that way", () => {
-  assert.equal(resolveWorkspaceDir("~/Development"), fs.realpathSync(DEV_ROOT));
+  const home = fs.realpathSync(os.homedir());
+  assert.equal(resolveWorkspaceDir("~/nonexistent-xyz"), path.join(home, "nonexistent-xyz"));
 });
 
 test("an absent value falls back to the supplied default", () => {
-  assert.equal(resolveWorkspaceDir(null, DEV_ROOT), fs.realpathSync(DEV_ROOT));
-  assert.equal(resolveWorkspaceDir("", DEV_ROOT), fs.realpathSync(DEV_ROOT));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "symposion-fallback-"));
+  try {
+    const expected = fs.realpathSync(dir);
+    assert.equal(resolveWorkspaceDir(null, dir), expected);
+    assert.equal(resolveWorkspaceDir("", dir), expected);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the default root resolves even when ~/Development does not exist", () => {
+  // The production default is ~/Development; it must not depend on that
+  // directory already existing, or a fresh machine would refuse every
+  // workspace including the one it is about to create.
+  assert.equal(isWorkspaceAllowed(path.join(DEV_ROOT, "some-repo"), [DEV_ROOT]), true);
 });
 
 test("the rejection message names what was refused AND how to widen it", () => {
