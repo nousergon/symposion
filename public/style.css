@@ -123,6 +123,28 @@ body {
   font-size: 12px; line-height: 1.45;
 }
 .context-advice.advise { background: #ff9f0a1a; border: 1px solid #ff9f0a44; color: #ffca7a; }
+/* The action lives inside the advice, not somewhere the reader has to go
+   find: an advisory whose recommended action is awkward to reach is one that
+   gets ignored (symposion-I107). */
+.advice-action {
+  display: inline-block; margin-left: 8px; padding: 2px 8px;
+  border-radius: 4px; border: 1px solid currentColor; background: transparent;
+  color: inherit; font: inherit; font-size: 11px; cursor: pointer;
+}
+.advice-action:hover { background: #ffffff14; }
+
+/* Archived sessions - deliberately quiet. History is available, not on offer. */
+.archives-slot:empty { display: none; }
+.archives-toggle, .archive-back {
+  margin-top: 6px; padding: 0; border: none; background: none;
+  color: #8a8a8e; font: inherit; font-size: 12px; cursor: pointer; text-decoration: underline;
+}
+.archives-body { margin-top: 4px; max-height: 320px; overflow-y: auto; font-size: 12px; }
+.archive-row { padding: 2px 0; }
+.archive-open { border: none; background: none; color: #0a84ff; font: inherit; font-size: 12px; cursor: pointer; padding: 0; }
+.archive-meta { color: #6a6a6e; }
+.archive-msg { padding: 4px 0; border-bottom: 1px solid #ffffff0f; white-space: pre-wrap; color: #b4b4b8; }
+.archive-msg.user { color: #8a8a8e; }
 .context-advice.urgent { background: #ff453a1a; border: 1px solid #ff453a55; color: #ff9a91; }
 
 /* A turn that is in flight but has produced no output for a while. Amber and

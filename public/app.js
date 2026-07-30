@@ -412,6 +412,8 @@ const triageSummaryEl = document.getElementById("triage-summary");
 const personaListEl = document.getElementById("persona-list");
 const chatHeaderTextEl = document.getElementById("chat-header-text");
 const contextAdviceEl = document.getElementById("context-advice");
+const archivesSlotEl = document.getElementById("archives-slot");
+const resetSessionBtnEl = document.getElementById("reset-session-btn");
 const chatSummaryEl = document.getElementById("chat-summary");
 const handoffBtnEl = document.getElementById("handoff-btn");
 const handoffCardEl = document.getElementById("handoff-card");
@@ -743,7 +745,95 @@ function statusLabel(p) {
 function renderContextAdvice(p) {
   if (!p.contextAdvice) return "";
   const band = p.contextBand === "urgent" ? "urgent" : "advise";
-  return `<div class="context-advice ${band}">${p.contextAdvice}</div>`;
+  return `<div class="context-advice ${band}">${p.contextAdvice}<button type="button" class="advice-action" data-action="reset-session">Start fresh session</button></div>`;
+}
+
+/**
+ * Starts a fresh session for the active persona, keeping the persona itself.
+ *
+ * Confirmed rather than immediate: it is not destructive (the transcript is
+ * archived and still readable) but it IS irreversible in the sense that the
+ * model loses the conversation, and that is worth one click of friction.
+ */
+async function resetActiveSession() {
+  const p = latestPersonas.find((x) => x.id === activePersonaId);
+  if (!p) return;
+  const detail = p.contextOccupancy
+    ? `\n\nIts ${formatTokens(p.contextOccupancy)} of context will be archived and readable, but the agent will not remember it.`
+    : "";
+  const carryOver = p.summary
+    ? "\n\nIts one-line summary will be carried into the first message of the new session for continuity."
+    : "";
+  if (!confirm(`Start a fresh session for ${p.name}?\n\nIt keeps its name, worktree, model and settings.${detail}${carryOver}`)) return;
+  try {
+    const res = await fetch(`/api/personas/${p.id}/reset-session`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      alert(`Could not reset the session: ${body.error ?? res.status}`);
+      return;
+    }
+    await refreshPersonas();
+    const refreshed = latestPersonas.find((x) => x.id === p.id);
+    if (refreshed) await selectPersona(refreshed);
+  } catch (err) {
+    alert(`Could not reset the session: ${err.message}`);
+  }
+}
+
+/** The "N earlier sessions" affordance, plus an inline read-only viewer. */
+function renderArchives(p) {
+  if (!p || !p.archivedSessions) {
+    archivesSlotEl.innerHTML = "";
+    return;
+  }
+  const n = p.archivedSessions;
+  archivesSlotEl.innerHTML = `<button type="button" class="archives-toggle">${n} earlier session${n === 1 ? "" : "s"}</button><div class="archives-body" hidden></div>`;
+  const toggle = archivesSlotEl.querySelector(".archives-toggle");
+  const body = archivesSlotEl.querySelector(".archives-body");
+
+  async function showList() {
+    body.textContent = "Loading…";
+    try {
+      const { archives } = await (await fetch(`/api/personas/${p.id}/archives`)).json();
+      body.innerHTML = archives
+        .map(
+          (a) =>
+            `<div class="archive-row"><button type="button" class="archive-open" data-archive="${a.id}">${escapeHtml(new Date(a.archivedAt).toLocaleString())}</button> <span class="archive-meta">${a.messageCount} messages</span></div>`,
+        )
+        .join("");
+      body.querySelectorAll(".archive-open").forEach((btn) => btn.addEventListener("click", () => showArchive(btn.dataset.archive)));
+    } catch (err) {
+      body.textContent = `Could not load archives: ${err.message}`;
+    }
+  }
+
+  async function showArchive(archiveId) {
+    body.textContent = "Loading…";
+    try {
+      const archive = await (await fetch(`/api/personas/${p.id}/archives/${archiveId}`)).json();
+      // Read-only and plain: this is history, and rendering it with the live
+      // transcript's affordances would invite acting on it. Text is escaped
+      // and truncated - an archive can hold a very long turn, and this view
+      // exists to answer "what was that about", not to replace the transcript.
+      body.innerHTML =
+        `<button type="button" class="archive-back">← back to list</button>` +
+        archive.messages
+          .map((m) => `<div class="archive-msg ${m.role === "user" ? "user" : "assistant"}"><b>${escapeHtml(String(m.role ?? ""))}</b>: ${escapeHtml(String(m.text ?? "")).slice(0, 4000)}</div>`)
+          .join("");
+      body.querySelector(".archive-back").addEventListener("click", showList);
+    } catch (err) {
+      body.textContent = `Could not load that archive: ${err.message}`;
+    }
+  }
+
+  toggle.addEventListener("click", () => {
+    if (!body.hidden) {
+      body.hidden = true;
+      return;
+    }
+    body.hidden = false;
+    showList();
+  });
 }
 
 function renderPersonaList(personas) {
@@ -872,6 +962,9 @@ async function deletePersona(p) {
     if (activeStream) { activeStream.close(); activeStream = null; }
     chatHeaderTextEl.textContent = "Select or create an agent to begin";
     renameBtnEl.hidden = true;
+    resetSessionBtnEl.hidden = true;
+    contextAdviceEl.innerHTML = "";
+    archivesSlotEl.innerHTML = "";
     handoffBtnEl.hidden = true;
     handoffCardEl.hidden = true;
     handoffCardEl.innerHTML = "";
@@ -927,6 +1020,7 @@ async function refreshPersonas() {
   // surfaces without waiting for a turn - which is the whole point of warning
   // BEFORE the TTL cliff rather than after it.
   contextAdviceEl.innerHTML = active ? renderContextAdvice(active) : "";
+  renderArchives(active);
   return personas;
 }
 
@@ -1010,6 +1104,15 @@ function renderHandoffState(persona) {
 renameBtnEl.addEventListener("click", () => {
   const active = latestPersonas.find((p) => p.id === activePersonaId);
   if (active) editPersona(active);
+});
+
+resetSessionBtnEl.addEventListener("click", resetActiveSession);
+
+// The advisory's own button. Delegated because the advice element is
+// re-rendered on every poll, so a directly-bound listener would be lost the
+// moment the countdown ticked.
+contextAdviceEl.addEventListener("click", (e) => {
+  if (e.target.dataset?.action === "reset-session") resetActiveSession();
 });
 
 handoffBtnEl.addEventListener("click", async () => {
@@ -1819,7 +1922,9 @@ async function selectPersona(p) {
   // Immediately on select, not only on the next poll - switching to a persona
   // that is about to lose an expensive cache should say so at once.
   contextAdviceEl.innerHTML = renderContextAdvice(p);
+  renderArchives(p);
   renameBtnEl.hidden = false;
+  resetSessionBtnEl.hidden = false;
   // Force the handoff card to re-render for the newly selected persona even
   // if its cache key happens to match the previous persona's.
   delete handoffCardEl.dataset.key;

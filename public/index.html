@@ -28,6 +28,7 @@
           <span class="chat-header-title">
             <span id="chat-header-text">Select or create an agent to begin</span>
             <button type="button" id="rename-btn" class="icon-btn" title="Edit this agent (name/model)" hidden>✎</button>
+            <button type="button" id="reset-session-btn" class="icon-btn" title="Start a fresh session — keeps this agent, its worktree and its model, archives the transcript" hidden>⟳</button>
           </span>
           <button type="button" id="handoff-btn" class="handoff-btn" title="Hand this session off to Remote Control - continue it from the Claude mobile app or claude.ai/code" hidden>📱 Hand off</button>
         </div>
@@ -36,6 +37,9 @@
              list because it is a property of the SESSION, not of any one turn,
              and because it has to stay visible while scrolled back. -->
         <div class="context-advice-slot" id="context-advice"></div>
+        <!-- "N earlier sessions" - present only once a reset has happened, so
+             a shed transcript reads as archived rather than destroyed. -->
+        <div class="archives-slot" id="archives-slot"></div>
       </div>
       <div class="chat-messages" id="chat-messages"></div>
       <div class="handoff-card" id="handoff-card" hidden></div>

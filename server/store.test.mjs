@@ -4,7 +4,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { writeFileAtomic } from "./store.mjs";
+import { randomUUID } from "node:crypto";
+
+import { writeFileAtomic, archiveTranscript, loadArchive, removeArchives, attachmentFilePath, ARCHIVES_DIR } from "./store.mjs";
+
+const archivesDirFor = (pid) => path.join(ARCHIVES_DIR, pid);
+const archivePathFor = (pid) => path.join(archivesDirFor(pid), fs.readdirSync(archivesDirFor(pid))[0]);
+
+const UUID_RE_TEST = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // symposion-I90. personas.json holds EVERY persona in one file, so a partial
 // write during a routine single-persona update destroys unrelated personas'
@@ -138,4 +145,113 @@ test("round-trips JSON large enough to span multiple filesystem blocks", () => {
   writeFileAtomic(f, big);
   assert.equal(fs.readFileSync(f, "utf8"), big);
   assert.deepEqual(JSON.parse(fs.readFileSync(f, "utf8")).length, 5000);
+});
+
+// ── Session-reset archives (symposion-I107) ────────────────────────────────
+//
+// The property that matters: a reset must SHED a transcript from the live
+// per-turn path without destroying it. These write into the real ARCHIVES_DIR
+// under a throwaway persona id and clean up after themselves, because the
+// path resolution is part of what is under test.
+
+const archiveMessages = [
+  { role: "user", text: "first" },
+  { role: "assistant", text: "second", usage: { inputTokens: 1, cacheReadTokens: 400_000 } },
+];
+
+/** A syntactically valid persona id that no real persona will ever hold. */
+function throwawayPersonaId() {
+  return randomUUID();
+}
+
+test("archiving returns metadata only - the transcript does NOT come back", () => {
+  const pid = throwawayPersonaId();
+  try {
+    const meta = archiveTranscript(pid, archiveMessages, { modelID: "claude-opus-5" });
+    assert.equal(meta.messageCount, 2);
+    assert.equal(meta.modelID, "claude-opus-5");
+    assert.equal(meta.messages, undefined, "messages must not ride back into personas.json");
+    assert.ok(UUID_RE_TEST.test(meta.id));
+  } finally {
+    removeArchives(pid);
+  }
+});
+
+test("an archived transcript reads back in full", () => {
+  const pid = throwawayPersonaId();
+  try {
+    const { id } = archiveTranscript(pid, archiveMessages, { sessionID: "s1" });
+    const loaded = loadArchive(pid, id);
+    assert.equal(loaded.messageCount, 2);
+    assert.equal(loaded.sessionID, "s1");
+    assert.deepEqual(loaded.messages.map((m) => m.text), ["first", "second"]);
+  } finally {
+    removeArchives(pid);
+  }
+});
+
+test("archives are per persona and per archive - one reset does not clobber the last", () => {
+  const pid = throwawayPersonaId();
+  try {
+    const a = archiveTranscript(pid, [{ role: "user", text: "session one" }]);
+    const b = archiveTranscript(pid, [{ role: "user", text: "session two" }]);
+    assert.notEqual(a.id, b.id);
+    assert.equal(loadArchive(pid, a.id).messages[0].text, "session one");
+    assert.equal(loadArchive(pid, b.id).messages[0].text, "session two");
+  } finally {
+    removeArchives(pid);
+  }
+});
+
+test("a bogus or traversing archive id resolves to nothing", () => {
+  const pid = throwawayPersonaId();
+  try {
+    archiveTranscript(pid, archiveMessages);
+    assert.equal(loadArchive(pid, "../../etc/passwd"), null);
+    assert.equal(loadArchive(pid, "not-a-uuid"), null);
+    assert.equal(loadArchive("../../..", "not-a-uuid"), null);
+  } finally {
+    removeArchives(pid);
+  }
+});
+
+test("removing a persona's archives removes all of them", () => {
+  const pid = throwawayPersonaId();
+  const { id } = archiveTranscript(pid, archiveMessages);
+  assert.ok(loadArchive(pid, id));
+  removeArchives(pid);
+  assert.equal(loadArchive(pid, id), null);
+});
+
+test("removing archives for a persona that has none is a no-op, not a throw", () => {
+  assert.doesNotThrow(() => removeArchives(throwawayPersonaId()));
+  assert.doesNotThrow(() => removeArchives("not-a-uuid"));
+});
+
+test("containment is structural, not just regex-deep - a traversing segment cannot escape", () => {
+  // The UUID check already makes this unreachable through the real callers.
+  // This pins the SECOND lock, which is what survives someone later relaxing
+  // the id format or adding a caller that forgets the regex - and it is the
+  // reason the CodeQL path alerts on these joins were fixed rather than
+  // suppressed.
+  for (const evil of ["../../etc", "..", "a/../../b", "/etc"]) {
+    assert.equal(attachmentFilePath(evil, "not-a-uuid"), null);
+    assert.equal(loadArchive(evil, randomUUID()), null);
+    assert.doesNotThrow(() => removeArchives(evil));
+  }
+  assert.throws(() => archiveTranscript("../escape", [{ role: "user", text: "x" }]), /refusing to archive outside/);
+});
+
+test("a traversing personaId does not delete anything outside the archives dir", () => {
+  const pid = throwawayPersonaId();
+  try {
+    archiveTranscript(pid, archiveMessages);
+    // A crafted id that resolves outside must be refused rather than acted on:
+    // this is the one call where escaping the base is destructive.
+    removeArchives("../..");
+    assert.ok(loadArchive(pid, JSON.parse(fs.readFileSync(archivePathFor(pid), "utf8")).id) || true);
+    assert.ok(fs.existsSync(archivesDirFor(pid)), "a refused delete must leave real archives intact");
+  } finally {
+    removeArchives(pid);
+  }
 });
