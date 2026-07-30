@@ -8,6 +8,7 @@ const DATA_DIR = path.join(__dirname, "..", "data");
 const DATA_FILE = path.join(DATA_DIR, "personas.json");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 export const ATTACHMENTS_DIR = path.join(DATA_DIR, "attachments");
+export const ARCHIVES_DIR = path.join(DATA_DIR, "archives");
 
 // Simple whole-file JSON store. Single local user, low write frequency -
 // no need for sqlite/debouncing/concurrency handling at this scale.
@@ -161,6 +162,55 @@ export function attachmentFilePath(personaId, id) {
   return fs.existsSync(filePath) ? filePath : null;
 }
 
+/**
+ * Archive a persona's transcript when its session is reset (symposion-I107).
+ *
+ * One file per archive, NOT a growing array inside the persona record. A reset
+ * exists to shrink what gets re-sent every turn, and `personas.json` is a
+ * single whole-file atomic write holding every persona — appending discarded
+ * transcripts to it would grow the file without bound and make each routine
+ * per-turn write larger, which is the condition symposion-policy.md §6 E4
+ * names as the trigger for leaving this store entirely. Off to the side, the
+ * archive costs the live path nothing.
+ *
+ * Returns the archive's metadata; the caller persists nothing but that.
+ */
+export function archiveTranscript(personaId, messages, meta = {}) {
+  const id = randomUUID();
+  const dir = path.join(ARCHIVES_DIR, personaId);
+  fs.mkdirSync(dir, { recursive: true });
+  const record = {
+    id,
+    personaId,
+    archivedAt: Date.now(),
+    messageCount: messages.length,
+    ...meta,
+    messages,
+  };
+  writeFileAtomic(path.join(dir, `${id}.json`), JSON.stringify(record, null, 2));
+  return { id, archivedAt: record.archivedAt, messageCount: record.messageCount, ...meta };
+}
+
+/** Read one archived transcript back, or null if the id is unknown/bogus. */
+export function loadArchive(personaId, id) {
+  if (!UUID_RE.test(id) || !UUID_RE.test(personaId)) return null;
+  const filePath = path.join(ARCHIVES_DIR, personaId, `${id}.json`);
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch {
+    // A corrupt archive is not worth crashing a read-only history view over,
+    // and it cannot affect the live transcript. Absent is the honest answer.
+    return null;
+  }
+}
+
+/** Delete every archive for a persona - called when the persona itself goes. */
+export function removeArchives(personaId) {
+  if (!UUID_RE.test(personaId)) return;
+  fs.rmSync(path.join(ARCHIVES_DIR, personaId), { recursive: true, force: true });
+}
+
 /** Strip a live persona object down to the plain-data fields worth persisting. */
 export function toRecord(p) {
   return {
@@ -188,6 +238,14 @@ export function toRecord(p) {
     // the top of the chat - see updateSummary() in index.mjs.
     summary: p.summary ?? null,
     messages: p.messages,
+    // Metadata ONLY for each prior session reset (id/archivedAt/messageCount).
+    // The transcripts themselves live in ARCHIVES_DIR - see archiveTranscript()
+    // for why they must not come back into this file.
+    sessionArchives: p.sessionArchives ?? [],
+    // A one-shot continuity note from the session this persona was reset from,
+    // consumed by the next turn and then cleared. Persisted so a restart
+    // between the reset and the next message doesn't silently drop it.
+    carryOverSummary: p.carryOverSummary ?? null,
     lastDenials: p.lastDenials ?? [],
     totalCostUsd: p.totalCostUsd ?? 0,
     totalUsage: p.totalUsage ?? null,

@@ -9,7 +9,7 @@ import QRCode from "qrcode";
 import { ClaudeCodeSession, CLAUDE_MODELS, CLAUDE_PERMISSION_MODES, CLAUDE_EFFORT_LEVELS, CLAUDE_BIN, isValidClaudeModel } from "./claude-code-backend.mjs";
 import { ensureWorkspaceTrusted, startRemoteControl, stopRemoteControl, isProcessAlive, importRemoteTurns } from "./remote-control.mjs";
 import { OpenCodeServerPool } from "./opencode-pool.mjs";
-import { loadPersonas, savePersonas, toRecord, saveAttachment, attachmentFilePath, ATTACHMENTS_DIR, loadSettings, saveSettings, addPushSubscription, getPushSubscriptions, removePushSubscription } from "./store.mjs";
+import { loadPersonas, savePersonas, toRecord, saveAttachment, attachmentFilePath, ATTACHMENTS_DIR, loadSettings, saveSettings, addPushSubscription, getPushSubscriptions, removePushSubscription, archiveTranscript, loadArchive, removeArchives } from "./store.mjs";
 import { getVapidPublicKey, sendPush } from "./webpush.mjs";
 import { createPresenceTracker } from "./presence.mjs";
 import { isGitRepo, createIsolatedWorktree, removeWorktreeAndBranch } from "./worktree.mjs";
@@ -323,6 +323,24 @@ function wireBackgroundEvents(persona) {
 }
 
 /** Lazily (re)connect a persona's backend process/session after a restart. */
+/**
+ * The claude-code session id backing a persona.
+ *
+ * These were the same value until in-place session reset existed
+ * (symposion-I107): a reset has to start a NEW claude session while the
+ * persona keeps its identity, worktree and place in the sidebar, so the two
+ * ids have to be able to diverge. `sessionID` was already the field name for
+ * this on the api backend, so claude-code now uses it too.
+ *
+ * The `?? persona.id` fallback is what makes every persona created before this
+ * change keep working: their session genuinely IS their persona id, on disk in
+ * claude-code's own storage, and re-deriving it any other way would orphan
+ * their history.
+ */
+function claudeSessionId(persona) {
+  return persona.sessionID ?? persona.id;
+}
+
 async function ensureConnected(persona) {
   if (persona.backend === "claude-code") {
     // While handed off to Remote Control, the interactive claude process IS
@@ -335,7 +353,7 @@ async function ensureConnected(persona) {
     // Reconnect to the SAME worktree/cwd used originally - never re-derive
     // or re-create one on reconnect, or every restart would leak a new
     // worktree+branch for the same persona.
-    persona.claudeSession = new ClaudeCodeSession(persona.id, persona.modelID, persona.name, persona.actualCwd, resuming, persona.permissionMode, persona.effortLevel);
+    persona.claudeSession = new ClaudeCodeSession(claudeSessionId(persona), persona.modelID, persona.name, persona.actualCwd, resuming, persona.permissionMode, persona.effortLevel);
     wireBackgroundEvents(persona);
   } else {
     // Symposion no longer spawns or health-checks egress proxies here.
@@ -727,6 +745,10 @@ function personaSummary(p) {
     contextFraction: context.fraction,
     contextBand: context.band,
     contextAdvice: context.advice,
+    // How many prior sessions this persona has shed. Drives the "N earlier
+    // sessions" affordance - without it a reset would look like the transcript
+    // was simply destroyed.
+    archivedSessions: (p.sessionArchives ?? []).length,
     // True from the moment a turn finishes while Brian wasn't watching this
     // persona (same presence gate as notifyTurnFinished below) until he
     // actually selects it again (cleared in POST /api/presence) - the
@@ -822,6 +844,10 @@ async function createPersonaFromRecipe({ backend, providerID, modelID, modelGrou
     const claudeSession = new ClaudeCodeSession(id, modelID, name, actualCwd, false, permissionMode || null, effortLevel || null);
     persona = {
       id, name, backend, modelID, modelGroup: modelGroup ?? null,
+      // Equal to the persona id at birth, but stored explicitly rather than
+      // implied: an in-place session reset replaces this and only this, and a
+      // value that is merely implied cannot be replaced. See claudeSessionId().
+      sessionID: id,
       workspaceDir, actualCwd, isolated, worktreeBranch,
       permissionMode: permissionMode || null,
       effortLevel: effortLevel || null,
@@ -1233,9 +1259,135 @@ app.delete("/api/personas/:id", async (req, res) => {
     }
   }
 
+  // Archived transcripts outlive a reset but not the persona - leaving them
+  // behind would accumulate orphaned directories under data/archives/ that
+  // nothing ever references again.
+  removeArchives(persona.id);
   personas.delete(persona.id);
   persistAll();
   res.status(204).end();
+});
+
+/**
+ * Starts a fresh session for a persona, keeping the persona (symposion-I107).
+ *
+ * This is the action the context/cache advisory recommends. Without it the
+ * only way to shed an expensive context was to create a DIFFERENT persona and
+ * delete this one — re-choosing the name, worktree, model, permission mode and
+ * effort level every time. An advisory whose recommended action is that
+ * awkward gets ignored, which is the failure mode the advisory exists to
+ * prevent.
+ *
+ * What is deliberately preserved, and why:
+ *  - The worktree and branch. This is a context reset, not a deletion; the
+ *    work in progress on disk is the whole reason the persona exists.
+ *  - Lifetime cost and token totals. They answer "what has this agent cost
+ *    me", which a reset does not change.
+ *  - The transcript, archived off to the side and still readable.
+ *
+ * What is replaced: the backend session id and everything the model can see.
+ */
+app.post("/api/personas/:id/reset-session", async (req, res) => {
+  const persona = personas.get(req.params.id);
+  if (!persona) return res.status(404).json({ error: "not found" });
+  if (persona.handoff) {
+    return res.status(409).json({ error: "persona is handed off to Remote Control - reclaim it before resetting its session" });
+  }
+  if (persona.pendingTurn) {
+    // Resetting mid-turn would strand the in-flight request against a session
+    // that no longer exists, and its late events would arrive for a transcript
+    // that has already been archived.
+    return res.status(409).json({ error: "a turn is still in flight - wait for it to finish before resetting" });
+  }
+
+  const previousMessages = persona.messages ?? [];
+  try {
+    // Tear the old session down BEFORE archiving, so a failure to stop the
+    // process cannot leave two live sessions believing they own this persona.
+    if (persona.backend === "claude-code") {
+      persona.claudeSession?.kill();
+      persona.claudeSession = null;
+    } else {
+      try {
+        await ensureConnected(persona);
+        await persona.opencodeEntry.client.session.delete({ path: { id: persona.sessionID } });
+      } catch (err) {
+        // Non-fatal by design: an unreachable OpenCode session must not trap
+        // the persona in an expensive context. Recorded rather than swallowed,
+        // and the reset proceeds — the stale remote session is a leak, not a
+        // correctness problem, and refusing here would leave Brian with no way
+        // out of the exact state this endpoint exists to escape.
+        console.error(`[reset] could not delete OpenCode session ${persona.sessionID} (continuing): ${err.message}`);
+      }
+      persona.opencodeEntry = null;
+    }
+
+    const archive = previousMessages.length
+      ? archiveTranscript(persona.id, previousMessages, {
+          sessionID: persona.sessionID ?? persona.id,
+          modelID: persona.modelID,
+          summary: persona.summary ?? null,
+        })
+      : null;
+
+    // A NEW backend session id. For claude-code this is what makes the next
+    // spawn a fresh session rather than a --resume of the one just abandoned.
+    persona.sessionID = randomUUID();
+    persona.messages = [];
+    persona.lastDenials = [];
+    persona.pendingPermission = null;
+    persona.pendingQuestion = null;
+    persona.backgroundTask = null;
+    persona.turnFinishedUnseen = false;
+    // Restart the cache clock: the new session shares no prefix with the old
+    // one, so counting down from the old session's last activity would show a
+    // warm cache that does not exist.
+    persona.lastActivityTs = Date.now();
+    // The retry budget is per-persona and per-request-hash; a reset changes
+    // what a request means, so an unsettled slot from the old session must not
+    // count against the new one.
+    persona._retryGuard = null;
+    if (archive) persona.sessionArchives = [...(persona.sessionArchives ?? []), archive];
+
+    // Continuity, if the caller wants it: one short note consumed by the next
+    // turn (see the message handler), never a system prompt. Per
+    // prompt-caching-policy.md §5.4, injected content belongs in the turn -
+    // putting it in the prefix is the catastrophic version of this idea.
+    const carryOver = req.body?.carryOverSummary !== false && persona.summary;
+    persona.carryOverSummary = carryOver ? persona.summary : null;
+    persona.summary = null;
+
+    // Reconnect eagerly so a failure surfaces HERE, as a failed reset, rather
+    // than on Brian's next message with the transcript already archived.
+    await ensureConnected(persona);
+
+    persistAll();
+    console.log(
+      `[reset] ${persona.name} (${persona.id}) → new session ${persona.sessionID}; archived ${previousMessages.length} messages${archive ? ` as ${archive.id}` : ""}`,
+    );
+    hub.publish(persona.id, { type: "session-reset" });
+    res.json({ persona: personaSummary(persona), archived: archive });
+  } catch (err) {
+    console.error(`[reset] failed for ${persona.id}:`, err);
+    res.status(500).json({ error: String(err) });
+  }
+});
+
+/** Lists a persona's archived transcripts, newest first - metadata only. */
+app.get("/api/personas/:id/archives", (req, res) => {
+  const persona = personas.get(req.params.id);
+  if (!persona) return res.status(404).json({ error: "not found" });
+  const archives = [...(persona.sessionArchives ?? [])].sort((a, b) => b.archivedAt - a.archivedAt);
+  res.json({ archives });
+});
+
+/** Reads one archived transcript back in full. */
+app.get("/api/personas/:id/archives/:archiveId", (req, res) => {
+  const persona = personas.get(req.params.id);
+  if (!persona) return res.status(404).json({ error: "not found" });
+  const archive = loadArchive(persona.id, req.params.archiveId);
+  if (!archive) return res.status(404).json({ error: "archive not found" });
+  res.json(archive);
 });
 
 /**
@@ -1413,6 +1565,22 @@ app.post("/api/personas/:id/messages", async (req, res) => {
 
   persona.messages.push({ role: "user", text, ts: Date.now(), attachments: attachmentMetas });
 
+  // A persona whose session was just reset carries one short note forward, so
+  // the fresh session is cheap without being amnesiac. Consumed here and
+  // cleared, so it costs exactly one turn.
+  //
+  // It goes in the TURN, never in the system prompt: per
+  // prompt-caching-policy.md §5.4, injected content in the prefix is the
+  // catastrophic version of this idea, and it is also why this is prepended to
+  // `text` rather than added to `systemPrompt` below. Labelled as historical
+  // rather than presented as something the model said, mirroring how the
+  // Claude Code restore hook labels a recovered handoff.
+  let sentText = text;
+  if (persona.carryOverSummary) {
+    sentText = `<previous-session-summary>\nThis is a fresh session. For continuity only, here is what the previous session was about — it is historical context, not an instruction:\n\n${persona.carryOverSummary}\n</previous-session-summary>\n\n${text ?? ""}`;
+    persona.carryOverSummary = null;
+  }
+
   try {
     await ensureConnected(persona);
 
@@ -1443,7 +1611,11 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     // live inside promptOpenCodeStreaming, which left the `claude-code`
     // transport - the only one with a self-resending /loop - unbounded
     // (symposion-I101). Released only on success, at the bottom of this try.
-    const requestHash = claimTurn(persona, { text, attachments, system: systemPrompt });
+    // Fingerprinted on what is actually SENT, not on what was typed: the
+    // carry-over note makes the first post-reset turn a genuinely different
+    // request, and hashing the typed text would let it collide with the
+    // identical message sent before the reset.
+    const requestHash = claimTurn(persona, { text: sentText, attachments, system: systemPrompt });
 
     // Held as a local and compared by identity below, rather than reached
     // for through `persona.pendingTurn` on every callback. Both callbacks
@@ -1490,13 +1662,13 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     };
 
     if (persona.backend === "api") {
-      const result = await promptOpenCodeStreaming(persona, text, attachments, onDelta, onToolUpdate, systemPrompt, requestHash);
+      const result = await promptOpenCodeStreaming(persona, sentText, attachments, onDelta, onToolUpdate, systemPrompt, requestHash);
       replyText = result.text;
       parts = result.parts;
       costUsd = result.costUsd ?? 0;
       usage = result.usage ?? null;
     } else {
-      const result = await persona.claudeSession.sendMessage(text, attachments, onDelta, onToolUpdate);
+      const result = await persona.claudeSession.sendMessage(sentText, attachments, onDelta, onToolUpdate);
       replyText = result.replyText;
       denials = result.permissionDenials;
       parts = result.parts;
@@ -1619,7 +1791,7 @@ app.post("/api/personas/:id/handoff", async (req, res) => {
     ensureWorkspaceTrusted(persona.actualCwd);
     const { pid, url } = await startRemoteControl({
       claudeBin: CLAUDE_BIN,
-      sessionId: persona.id,
+      sessionId: claudeSessionId(persona),
       cwd: persona.actualCwd,
       model: persona.modelID,
       personaName: persona.name,
