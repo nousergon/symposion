@@ -32,6 +32,10 @@
           <button type="button" id="handoff-btn" class="handoff-btn" title="Hand this session off to Remote Control - continue it from the Claude mobile app or claude.ai/code" hidden>📱 Hand off</button>
         </div>
         <div class="chat-summary" id="chat-summary" hidden></div>
+        <!-- Context/cache advisory. Sits in the header rather than the message
+             list because it is a property of the SESSION, not of any one turn,
+             and because it has to stay visible while scrolled back. -->
+        <div class="context-advice-slot" id="context-advice"></div>
       </div>
       <div class="chat-messages" id="chat-messages"></div>
       <div class="handoff-card" id="handoff-card" hidden></div>
