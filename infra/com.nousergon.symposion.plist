@@ -46,9 +46,14 @@
          provider", not a fatal boot), so the whole thing degraded to log lines
          nobody reads — Web Push, xAI and Gemini were all silently unavailable
          while their keys sat correctly in SSM. See symposion#54.
-         Same profile the LiteLLM router shim uses. -->
+         ne-laptop-agent is the laptop's MACHINE identity (IAM Roles Anywhere,
+         nous-ergon-ops/infrastructure/laptop-identity) — it does not expire, so
+         unlike the human SSO profile it cannot go quiet mid-session. It is also
+         deliberately narrower than the admin credential this replaced: expect
+         AccessDenied on a path nobody enumerated, and answer it with a codified
+         grant rather than a widening. -->
     <key>AWS_PROFILE</key>
-    <string>ne-admin</string>
+    <string>ne-laptop-agent</string>
     <key>AWS_REGION</key>
     <string>us-east-1</string>
   </dict>
