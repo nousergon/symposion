@@ -22,6 +22,7 @@ import rateLimit from "express-rate-limit";
 import { migratePersonas, repairLastRecipe, LITELLM_PROVIDER_ID } from "./persona-migration.mjs";
 import { claimTurn, settleTurn, RetryLoopBlocked } from "./turn-guard.mjs";
 import { personaOccupancy, occupancyFromUsage, resolveWindow, assessContext, DEFAULT_CONTEXT_WINDOW } from "./context-budget.mjs";
+import { resolveWorkspaceDir, isWorkspaceAllowed, workspaceRoots, workspaceRejectionMessage } from "./workspace.mjs";
 
 const hub = new SseHub();
 
@@ -932,16 +933,28 @@ app.post("/api/personas", personaCreateLimiter);
  * folder on the filesystem is reachable by navigating up/down from here.
  */
 app.get("/api/browse-dir", (req, res) => {
-  let dir = req.query.path ? resolveWorkspaceDir(String(req.query.path)) : DEFAULT_WORKSPACE;
+  let dir = req.query.path ? resolveWorkspaceDir(String(req.query.path), DEFAULT_WORKSPACE) : DEFAULT_WORKSPACE;
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) dir = os.homedir();
   try {
     const entries = fs
       .readdirSync(dir, { withFileTypes: true })
       .filter((e) => e.isDirectory() && !e.name.startsWith("."))
-      .map((e) => ({ name: e.name, path: path.join(dir, e.name) }))
+      // `selectable` rather than filtering the list: navigating THROUGH a
+      // directory that cannot itself host a persona is normal (the home
+      // directory is the obvious case), so hiding them would break browsing.
+      // Marking them stops the picker from offering a choice that POST
+      // /api/personas will then refuse - an offer the caller cannot honour is
+      // worse than no offer.
+      .map((e) => ({ name: e.name, path: path.join(dir, e.name), selectable: isWorkspaceAllowed(path.join(dir, e.name)) }))
       .sort((a, b) => a.name.localeCompare(b.name));
     const parent = path.dirname(dir);
-    res.json({ path: dir, parent: parent === dir ? null : parent, entries });
+    res.json({
+      path: dir,
+      parent: parent === dir ? null : parent,
+      entries,
+      selectable: isWorkspaceAllowed(dir),
+      roots: workspaceRoots(),
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: String(err) });
@@ -1050,20 +1063,24 @@ app.get("/api/personas", (req, res) => {
   res.json([...personas.values()].map(personaSummary));
 });
 
-function resolveWorkspaceDir(raw) {
-  if (!raw) return DEFAULT_WORKSPACE;
-  // Accept ~/... same as a shell would, since people will type it that way.
-  const expanded = raw.startsWith("~") ? path.join(os.homedir(), raw.slice(1)) : raw;
-  return path.resolve(expanded);
-}
-
 app.post("/api/personas", async (req, res) => {
   try {
     let { backend, providerID, modelID, modelGroup, permissionMode, effortLevel } = req.body ?? {};
     // A name is never required to create a persona - an untyped/blank field
     // just gets a random star name, excluding whatever's already in use.
     const name = (req.body?.name ?? "").trim() || randomStarName([...personas.values()].map((p) => p.name));
-    const workspaceDir = resolveWorkspaceDir(req.body?.workspaceDir);
+    const workspaceDir = resolveWorkspaceDir(req.body?.workspaceDir, DEFAULT_WORKSPACE);
+    // The authorization the old resolver never did. This value flows into
+    // `git worktree add -b` with `cwd` set to it, so an unconstrained one lets
+    // this endpoint create a branch in any repo on the machine and run git
+    // anywhere - CodeQL alerts #42/#43/#44, symposion-I110. Enforced HERE, at
+    // the point of creation, and deliberately NOT on reconnect: an existing
+    // persona's worktree already exists, and re-checking it on every restart
+    // would strand personas created before this rule rather than protect
+    // anything that has not already happened.
+    if (!isWorkspaceAllowed(workspaceDir)) {
+      return res.status(400).json({ error: workspaceRejectionMessage(workspaceDir) });
+    }
     if (backend !== "api" && backend !== "claude-code") {
       return res.status(400).json({ error: 'backend must be "api" or "claude-code"' });
     }
