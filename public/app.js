@@ -411,6 +411,7 @@ const triageSummaryEl = document.getElementById("triage-summary");
 
 const personaListEl = document.getElementById("persona-list");
 const chatHeaderTextEl = document.getElementById("chat-header-text");
+const contextAdviceEl = document.getElementById("context-advice");
 const chatSummaryEl = document.getElementById("chat-summary");
 const handoffBtnEl = document.getElementById("handoff-btn");
 const handoffCardEl = document.getElementById("handoff-card");
@@ -696,6 +697,28 @@ function idleLabel(ms) {
   return ms < 60000 ? `${Math.round(ms / 1000)}s` : `${Math.round(ms / 60000)}m`;
 }
 
+/** 834455 -> "834K" - mirrors formatTokens() in server/context-budget.mjs. */
+function formatTokens(n) {
+  if (n === null || n === undefined) return "";
+  if (n < 1000) return String(n);
+  if (n < 100000) return `${(n / 1000).toFixed(1).replace(/\.0$/, "")}K`;
+  return `${Math.round(n / 1000)}K`;
+}
+
+/**
+ * How full this persona's context is, as a short label - or null when no turn
+ * has reported usage yet.
+ *
+ * Deliberately null rather than "0%" for unmeasured: a persona that has never
+ * spoken and one whose context is genuinely empty are different states, and
+ * only one of them is worth rendering.
+ */
+function contextLabel(p) {
+  if (p.contextOccupancy === null || p.contextOccupancy === undefined) return null;
+  const pct = Math.round((p.contextFraction ?? 0) * 100);
+  return `${formatTokens(p.contextOccupancy)} · ${pct}%`;
+}
+
 function statusLabel(p) {
   const bits = [];
   if (p.working) {
@@ -707,6 +730,20 @@ function statusLabel(p) {
   if (p.backgroundActive) bits.push("Background task running");
   if (p.scheduledWakeup) bits.push(`Wakes ${wakeupCountdown(p.scheduledWakeup.at)}`);
   return bits.length ? bits.join(" · ") : null;
+}
+
+/**
+ * The context/cache advisory, rendered only when the server decided there is
+ * something worth saying.
+ *
+ * The suppression is the server's call, not the client's - a threshold applied
+ * in two places drifts, and this one is mirrored from the Claude Code
+ * session-hygiene package precisely so the two surfaces agree.
+ */
+function renderContextAdvice(p) {
+  if (!p.contextAdvice) return "";
+  const band = p.contextBand === "urgent" ? "urgent" : "advise";
+  return `<div class="context-advice ${band}">${p.contextAdvice}</div>`;
 }
 
 function renderPersonaList(personas) {
@@ -739,7 +776,7 @@ function renderPersonaList(personas) {
       <span class="ttl-dot ${p.ttlStatus}" title="${p.ttlApproximate ? "Approximate - real cache window unknown for this provider" : "Confirmed 1-hour ephemeral cache window"}"></span>
       <span class="persona-name-block">
         <span class="persona-name">${p.blocked ? '<span class="blocked-flag">⚠</span>' : ready ? '<span class="ready-flag" title="Reply ready for review">✓</span>' : ""}${p.handoff ? '<span class="handoff-flag" title="Handed off to Remote Control">📱</span>' : ""}${p.name}${p.alive ? "" : " (crashed)"}</span>
-        <span class="persona-model">${modelLabel(p)} · ${workspaceLabel(p)}${costLabel(p.totalCostUsd) ? ` · ${costLabel(p.totalCostUsd)}` : ""}</span>
+        <span class="persona-model">${modelLabel(p)} · ${workspaceLabel(p)}${costLabel(p.totalCostUsd) ? ` · ${costLabel(p.totalCostUsd)}` : ""}${contextLabel(p) ? ` · <span class="context-usage${p.contextBand ? ` ${p.contextBand}` : ""}" title="Tokens in context, and how full the window is. Every turn re-sends all of it, so this IS the per-turn price.">${contextLabel(p)}</span>` : ""}</span>
         ${status ? `<span class="persona-status${ready ? " ready" : ""}">${status}</span>` : ""}
       </span>
       <span class="ttl-label" title="${p.ttlApproximate ? "Approximate - real cache window unknown for this provider" : "Confirmed 1-hour ephemeral cache window"}">${ttlLabel(p)}</span>
@@ -886,6 +923,10 @@ async function refreshPersonas() {
   // poll interval - without a dedicated "renamed" re-render path.
   if (active) chatHeaderTextEl.textContent = `${active.name} — ${modelLabel(active)} — ${workspaceLabel(active)}`;
   renderChatSummary(active);
+  // Recomputed on every poll, so a cache countdown crossing the threshold
+  // surfaces without waiting for a turn - which is the whole point of warning
+  // BEFORE the TTL cliff rather than after it.
+  contextAdviceEl.innerHTML = active ? renderContextAdvice(active) : "";
   return personas;
 }
 
@@ -1775,6 +1816,9 @@ async function selectPersona(p) {
   sendPresence();
   chatHeaderTextEl.textContent = `${p.name} — ${modelLabel(p)} — ${workspaceLabel(p)}`;
   renderChatSummary(p);
+  // Immediately on select, not only on the next poll - switching to a persona
+  // that is about to lose an expensive cache should say so at once.
+  contextAdviceEl.innerHTML = renderContextAdvice(p);
   renameBtnEl.hidden = false;
   // Force the handoff card to re-render for the newly selected persona even
   // if its cache key happens to match the previous persona's.

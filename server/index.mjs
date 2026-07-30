@@ -21,6 +21,7 @@ import { loadRepoContext } from "./repo-context.mjs";
 import rateLimit from "express-rate-limit";
 import { migratePersonas, repairLastRecipe, LITELLM_PROVIDER_ID } from "./persona-migration.mjs";
 import { claimTurn, settleTurn, RetryLoopBlocked } from "./turn-guard.mjs";
+import { personaOccupancy, occupancyFromUsage, resolveWindow, assessContext, DEFAULT_CONTEXT_WINDOW } from "./context-budget.mjs";
 
 const hub = new SseHub();
 
@@ -615,6 +616,32 @@ async function updateSummary(persona) {
   }
 }
 
+/**
+ * Largest context occupancy ever observed per model id, persisted in settings.
+ *
+ * This is how the context window gets resolved without trusting the model
+ * string: an occupancy of 834K is proof by existence that the window is not
+ * 200K. Held in settings rather than a new file so it rides the same atomic
+ * write as everything else (store.mjs writeFileAtomic) - a partial write here
+ * would corrupt persona defaults too, and personas.json has been destroyed
+ * that way once already (symposion-I90).
+ */
+let modelWindowObservations = settings.modelWindowObservations ?? {};
+
+function noteOccupancy(persona, occupancy) {
+  if (!occupancy || !persona.modelID) return;
+  const known = modelWindowObservations[persona.modelID] ?? 0;
+  if (occupancy <= known) return;
+  modelWindowObservations = { ...modelWindowObservations, [persona.modelID]: occupancy };
+  settings.modelWindowObservations = modelWindowObservations;
+  saveSettings(settings);
+  // Only interesting when it actually moves the resolved window, which is a
+  // once-per-model event rather than a per-turn one.
+  if (resolveWindow(persona.modelID, { [persona.modelID]: occupancy }) > DEFAULT_CONTEXT_WINDOW && known <= DEFAULT_CONTEXT_WINDOW) {
+    console.log(`[context] ${persona.modelID} observed at ${occupancy} tokens — resolving its window above the conservative default`);
+  }
+}
+
 function ttlInfo(persona) {
   const elapsed = Date.now() - persona.lastActivityTs;
   const remainingMs = Math.max(0, TTL_WINDOW_MS - elapsed);
@@ -664,6 +691,11 @@ function turnIdleMs(p) {
 
 function personaSummary(p) {
   const { remainingMs, status } = ttlInfo(p);
+  const context = assessContext({
+    occupancy: personaOccupancy(p),
+    window: resolveWindow(p.modelID, modelWindowObservations),
+    ttlRemainingMs: remainingMs,
+  });
   return {
     id: p.id,
     name: p.name,
@@ -687,6 +719,14 @@ function personaSummary(p) {
     // signal. null means no turn in flight, or a backend that cannot report
     // it; the UI must not render that as healthy.
     turnIdleMs: turnIdleMs(p),
+    // Context occupancy and cache-window economics - see context-budget.mjs.
+    // `contextOccupancy` null means no turn has reported usage yet, which the
+    // UI renders as "not measured" rather than as an empty context.
+    contextOccupancy: context.occupancy,
+    contextWindow: context.window,
+    contextFraction: context.fraction,
+    contextBand: context.band,
+    contextAdvice: context.advice,
     // True from the moment a turn finishes while Brian wasn't watching this
     // persona (same presence gate as notifyTurnFinished below) until he
     // actually selects it again (cleared in POST /api/presence) - the
@@ -1476,6 +1516,11 @@ app.post("/api/personas/:id/messages", async (req, res) => {
     // rendered live in front of him.
     persona.turnFinishedUnseen = !presence.isWatching(persona.id);
     accumulateUsage(persona, costUsd, usage);
+    // Learn this model's real context window from what it actually carried.
+    // Distinct from accumulateUsage, which sums a LIFETIME total: occupancy is
+    // this single turn's footprint, and conflating the two would report a
+    // persona as full after a dozen small turns.
+    noteOccupancy(persona, occupancyFromUsage(usage));
     persona.messages.push({
       role: "assistant",
       text: replyText || "(no text response)",

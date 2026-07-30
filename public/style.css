@@ -107,6 +107,24 @@ body {
 .activity-dot.idle { background: #5a5a5e; }
 .activity-dot.working { background: #0a84ff; animation: activity-pulse 1.2s ease-in-out infinite; }
 .activity-dot.blocked { background: #ff453a; }
+/* Context occupancy on the persona row. Neutral until it matters: the number
+   is useful at a glance long before it is a problem, so colouring it from the
+   start would train the eye to ignore the colour. */
+.context-usage { color: #8a8a8e; }
+.context-usage.notice { color: #8a8a8e; }
+.context-usage.advise { color: #ff9f0a; }
+.context-usage.urgent { color: #ff453a; font-weight: 600; }
+
+/* The context/cache advisory under the chat header. Only ever rendered when
+   the server decided there is something worth saying - see assessContext(). */
+.context-advice-slot:empty { display: none; }
+.context-advice {
+  margin-top: 6px; padding: 6px 10px; border-radius: 6px;
+  font-size: 12px; line-height: 1.45;
+}
+.context-advice.advise { background: #ff9f0a1a; border: 1px solid #ff9f0a44; color: #ffca7a; }
+.context-advice.urgent { background: #ff453a1a; border: 1px solid #ff453a55; color: #ff9a91; }
+
 /* A turn that is in flight but has produced no output for a while. Amber and
    NOT pulsing: the pulse is what reads as "actively producing", and this is
    precisely the state where that reassurance is unearned. Distinct from
