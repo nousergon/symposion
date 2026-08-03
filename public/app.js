@@ -490,34 +490,57 @@ async function fetchPersonas() {
   return res.json();
 }
 
+/** Wrap a fetch whose caller expects an array — return [] on any failure so the
+ *  UI degrades visibly (empty picker) instead of silently breaking when the
+ *  response is an error object. */
+async function fetchArray(path) {
+  try {
+    const res = await fetch(path);
+    if (!res.ok) throw new Error(`${path} returned ${res.status}`);
+    const data = await res.json();
+    if (!Array.isArray(data)) throw new Error(`${path} returned non-array`);
+    return data;
+  } catch (err) {
+    console.error(`[symposion] ${path} failed:`, err.message);
+    return [];
+  }
+}
+
 async function fetchProviders() {
-  const res = await fetch("/api/providers");
-  return res.json();
+  return fetchArray("/api/providers");
 }
 
 async function fetchClaudeModels() {
-  const res = await fetch("/api/claude-models");
-  return res.json();
+  return fetchArray("/api/claude-models");
 }
 
 async function fetchPermissionModes() {
-  const res = await fetch("/api/claude-permission-modes");
-  return res.json();
+  return fetchArray("/api/claude-permission-modes");
 }
 
 async function fetchEffortLevels() {
-  const res = await fetch("/api/claude-effort-levels");
-  return res.json();
+  return fetchArray("/api/claude-effort-levels");
 }
 
 async function fetchModelGroups() {
-  const res = await fetch("/api/model-groups");
-  return res.json();
+  return fetchArray("/api/model-groups");
 }
 
 async function fetchDefaults() {
-  const res = await fetch("/api/defaults");
-  return res.json();
+  try {
+    const res = await fetch("/api/defaults");
+    if (!res.ok) throw new Error(`/api/defaults returned ${res.status}`);
+    const data = await res.json();
+    // Must have at least the apiDefault and claudeCodeDefault keys to be
+    // usable — an error response like {error:"..."} lacks both.
+    if (!data?.apiDefault || !data?.claudeCodeDefault) throw new Error("/api/defaults returned unexpected shape");
+    return data;
+  } catch (err) {
+    console.error("[symposion] /api/defaults failed:", err.message);
+    // caller checks `defaults?.lastRecipe` etc — returning null gives a
+    // blank defaults object rather than lying about what the server says
+    return null;
+  }
 }
 
 async function fetchRandomName() {
