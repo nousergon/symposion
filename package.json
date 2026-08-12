@@ -17,20 +17,20 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@aws-sdk/client-ssm": "^3.1101.0",
-    "@opencode-ai/sdk": "^1.18.11",
+    "@aws-sdk/client-ssm": "^3.1106.0",
+    "@opencode-ai/sdk": "^1.18.15",
     "dompurify": "^3.4.13",
     "express": "^5.2.1",
-    "express-rate-limit": "^8.6.1",
-    "marked": "^18.0.7",
-    "opencode-ai": "^1.18.11",
+    "express-rate-limit": "^8.6.2",
+    "marked": "^18.0.9",
+    "opencode-ai": "^1.18.15",
     "qrcode": "^1.5.4",
     "web-push": "^3.6.7"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "c8": "^12.0.0",
-    "eslint": "^10.8.0",
-    "globals": "^17.8.0"
+    "eslint": "^10.8.1",
+    "globals": "^17.9.0"
   }
 }
