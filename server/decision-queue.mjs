@@ -1,11 +1,28 @@
 import { execFileSync } from "node:child_process";
 
-const BACKLOG_REPOS = ["alpha-engine-config", "metron-ops", "vires-ops", "telos-ops"];
+// Roles come from alpha-engine-config/private-docs/REPO_ROSTER.yaml — the single
+// declaration for which org repos hold a groomed backlog and which the agent
+// opens PRs against. This repo is public and cannot read that private file, so
+// these two lists are DECLARED MIRRORS: they are registered in the roster's
+// `mirrors:` block and `check_repo_roster_drift.py --live` fails whenever they
+// stop matching it. A mirror is legal; a mirror that drifts is a CI failure.
+//
+// alpha-engine-config-I8197: CODE_REPOS previously listed 16 repos and omitted
+// symposion itself, so `symposion#39` carried `triage:session` for 33 days and
+// was invisible to THIS server — the repo's own draining surface could not see
+// the repo's own item. Do not hand-edit these lists; update the roster and
+// mirror it here in the same change.
+const BACKLOG_REPOS = [
+  "alpha-engine-config", "metron-ops", "vires-ops", "telos-ops",
+  "symposion", "claude-code-config", "nousergon-console", "oiax"
+];
 const CODE_REPOS = [
-  "alpha-engine-config", "metron-ops", "crucible-executor", "nousergon-data",
-  "crucible-predictor", "crucible-research", "crucible-backtester",
-  "crucible-dashboard", "crucible-evaluator", "nousergon-lib",
-  "nousergon-docs", "metron", "vires", "vires-ops", "telos", "telos-ops",
+  "alpha-engine-config", "metron-ops", "vires-ops", "telos-ops",
+  "symposion", "claude-code-config", "nous-ergon-ops", "nousergon-console",
+  "oiax", "nousergon-groomer", "crucible-executor", "crucible-predictor",
+  "crucible-research", "crucible-backtester", "crucible-dashboard",
+  "crucible-evaluator", "nousergon-data", "nousergon-lib",
+  "nousergon-docs", "metron", "vires", "telos"
 ];
 
 // Every repo/number pair this module operates on must resolve against this
