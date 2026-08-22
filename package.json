@@ -7,7 +7,7 @@
     "test": "node --test server/*.test.mjs",
     "sync-vendor": "cp node_modules/marked/lib/marked.umd.js public/vendor/marked.js && cp node_modules/dompurify/dist/purify.min.js public/vendor/purify.min.js",
     "lint": "eslint server/ public/app.js public/dictation-policy.js public/sw.js",
-    "test:coverage": "c8 --all --include 'server/**/*.mjs' --exclude '**/*.test.mjs' --reporter=text --reporter=text-summary --check-coverage --lines 34 node --test server/*.test.mjs"
+    "test:coverage": "c8 --all --include 'server/**/*.mjs' --exclude '**/*.test.mjs' --reporter=text --reporter=text-summary --check-coverage --lines 37 node --test server/*.test.mjs"
   },
   "keywords": [],
   "author": "",
