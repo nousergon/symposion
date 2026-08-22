@@ -16,6 +16,7 @@ import { isGitRepo, createIsolatedWorktree, removeWorktreeAndBranch } from "./wo
 import { randomStarName } from "./star-names.mjs";
 import { SseHub } from "./sse-hub.mjs";
 import { fetchQueue, itemToQuestion, postComment, removeLabels, addLabels, closeIssue, markPrReadyForReview } from "./decision-queue.mjs";
+import { createPersonasRouter } from "./routes/personas.mjs";
 
 import { loadRepoContext } from "./repo-context.mjs";
 import rateLimit from "express-rate-limit";
@@ -1008,15 +1009,6 @@ app.get("/api/model-groups", async (req, res) => {
   }
 });
 
-/**
- * A fresh random star name, excluding names already in use by a live
- * persona - backs the "New Agent" modal's auto-filled name field and its
- * dice/regenerate button, so nobody has to type a name to create a persona.
- */
-app.get("/api/random-name", (req, res) => {
-  res.json({ name: randomStarName([...personas.values()].map((p) => p.name)) });
-});
-
 app.get("/api/webpush/vapid-public-key", async (req, res) => {
   const publicKey = await getVapidPublicKey();
   if (!publicKey) return res.status(404).json({ error: "web push not configured" });
@@ -1064,84 +1056,36 @@ app.post("/api/server/restart", (req, res) => {
   setTimeout(() => process.exit(0), 150);
 });
 
-app.get("/api/personas", (req, res) => {
-  res.json([...personas.values()].map(personaSummary));
-});
-
-app.post("/api/personas", async (req, res) => {
-  try {
-    let { backend, providerID, modelID, modelGroup, permissionMode, effortLevel } = req.body ?? {};
-    // A name is never required to create a persona - an untyped/blank field
-    // just gets a random star name, excluding whatever's already in use.
-    const name = (req.body?.name ?? "").trim() || randomStarName([...personas.values()].map((p) => p.name));
-    const workspaceDir = resolveWorkspaceDir(req.body?.workspaceDir, DEFAULT_WORKSPACE);
-    // The authorization the old resolver never did. This value flows into
-    // `git worktree add -b` with `cwd` set to it, so an unconstrained one lets
-    // this endpoint create a branch in any repo on the machine and run git
-    // anywhere - CodeQL alerts #42/#43/#44, symposion-I110. Enforced HERE, at
-    // the point of creation, and deliberately NOT on reconnect: an existing
-    // persona's worktree already exists, and re-checking it on every restart
-    // would strand personas created before this rule rather than protect
-    // anything that has not already happened.
-    if (!isWorkspaceAllowed(workspaceDir)) {
-      return res.status(400).json({ error: workspaceRejectionMessage(workspaceDir) });
-    }
-    if (backend !== "api" && backend !== "claude-code") {
-      return res.status(400).json({ error: 'backend must be "api" or "claude-code"' });
-    }
-
-    // Resolve modelGroup → concrete providerID/modelID via krepis router.
-    // Group wins over any separately provided providerID/modelID.
-    if (modelGroup) {
-      // Capability classes are an api-backend concept: the router owns what a
-      // class means. The claude-code backend shells out to `claude -p --model
-      // <id>`, which takes a concrete model and answers an unknown one with a
-      // 404 wearing an assistant message - so resolving a class here would
-      // hand the CLI the literal string "high" (symposion-I96).
-      if (backend === "claude-code") {
-        return res.status(400).json({ error: "modelGroup is api-backend only - claude-code personas take a concrete modelID from GET /api/claude-models" });
-      }
-      if (!MODEL_GROUP_KEYS.includes(modelGroup)) {
-        return res.status(400).json({ error: `unrecognized modelGroup: ${modelGroup}. Valid: ${MODEL_GROUP_KEYS.join(", ")}` });
-      }
-      const resolved = resolveModelGroup(modelGroup);
-      if (!resolved) {
-        return res.status(503).json({ error: `modelGroup ${modelGroup} is not currently available (krepis resolution pending or failed)` });
-      }
-      providerID = resolved.providerID;
-      modelID = resolved.modelID;
-    }
-
-    if (!modelID && !modelGroup) return res.status(400).json({ error: "modelID or modelGroup is required" });
-    if (backend === "claude-code" && !isValidClaudeModel(modelID)) {
-      return res.status(400).json({ error: `unrecognized claude-code modelID: ${JSON.stringify(modelID)}. Valid: ${CLAUDE_MODELS.map((m) => m.modelID).join(", ")}` });
-    }
-    if (permissionMode && !CLAUDE_PERMISSION_MODES.some((m) => m.value === permissionMode)) {
-      return res.status(400).json({ error: `unrecognized permissionMode: ${permissionMode}` });
-    }
-    if (effortLevel && !CLAUDE_EFFORT_LEVELS.some((m) => m.value === effortLevel)) {
-      return res.status(400).json({ error: `unrecognized effortLevel: ${effortLevel}` });
-    }
-    if (!path.isAbsolute(workspaceDir)) {
-      return res.status(400).json({ error: `workspaceDir must be an absolute path (or start with ~): ${req.body?.workspaceDir}` });
-    }
-    if (!fs.existsSync(workspaceDir)) {
-      return res.status(400).json({ error: `workspaceDir does not exist: ${workspaceDir}` });
-    }
-    if (!fs.statSync(workspaceDir).isDirectory()) {
-      return res.status(400).json({ error: `workspaceDir is not a directory: ${workspaceDir}` });
-    }
-    if (backend === "api" && !providerID) {
-      return res.status(400).json({ error: "providerID is required for backend=api" });
-    }
-
-    const persona = await createPersonaFromRecipe({ backend, providerID, modelID, modelGroup, permissionMode, effortLevel, workspaceDir, name });
-    res.status(201).json(personaSummary(persona));
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: String(err) });
-  }
-});
+// GET /api/random-name, GET/POST /api/personas and DELETE /api/personas/:id
+// live in ./routes/personas.mjs — extracted so they are importable (and
+// therefore testable) on their own, without index.mjs's module-scope side
+// effects (real OpenCodeServerPool, loaded personas.json, app.listen).
+// See symposion#39 / policy T1-1.
+app.use(
+  createPersonasRouter({
+    personas,
+    fs,
+    path,
+    resolveWorkspaceDir,
+    isWorkspaceAllowed,
+    workspaceRejectionMessage,
+    DEFAULT_WORKSPACE,
+    MODEL_GROUP_KEYS,
+    resolveModelGroup,
+    isValidClaudeModel,
+    CLAUDE_MODELS,
+    CLAUDE_PERMISSION_MODES,
+    CLAUDE_EFFORT_LEVELS,
+    createPersonaFromRecipe,
+    personaSummary,
+    randomStarName,
+    stopRemoteControl,
+    removeWorktreeAndBranch,
+    ensureConnected,
+    removeArchives,
+    persistAll,
+  }),
+);
 
 /* ── Quick Agents (one-click chip presets) ── */
 
@@ -1240,54 +1184,6 @@ app.get("/api/personas/:id/stream", async (req, res) => {
   // subscription so the reclaim event reaches this client.
   if (!persona.handoff) await ensureConnected(persona);
   hub.subscribe(persona.id, res);
-});
-
-/**
- * Full wind-down, not just a UI hide: stop the actual backend process/
- * session so nothing keeps running or billing after deletion, and clean up
- * every artifact this persona created (worktree, branch, OpenCode session)
- * rather than leaving them orphaned.
- */
-app.delete("/api/personas/:id", async (req, res) => {
-  const persona = personas.get(req.params.id);
-  if (!persona) return res.status(404).json({ error: "not found" });
-
-  if (persona.backend === "claude-code") {
-    persona.claudeSession?.kill();
-    // A handed-off persona's live process is the detached remote-control
-    // pair, not claudeSession - kill it too or deleting the persona would
-    // leave a phone-controllable session running in a just-removed worktree.
-    if (persona.handoff) stopRemoteControl(persona.handoff.pid);
-    if (persona.isolated) {
-      removeWorktreeAndBranch(persona.workspaceDir, persona.actualCwd, persona.worktreeBranch, {
-        personaId: persona.id,
-        personaName: persona.name,
-        reason: "persona deleted (claude-code)",
-      });
-    }
-  } else {
-    try {
-      await ensureConnected(persona); // opencodeEntry may be null if never reconnected since a restart
-      await persona.opencodeEntry.client.session.delete({ path: { id: persona.sessionID } });
-    } catch (err) {
-      console.error(`[delete] failed to delete OpenCode session ${persona.sessionID}:`, err.message);
-    }
-    if (persona.isolated) {
-      removeWorktreeAndBranch(persona.workspaceDir, persona.actualCwd, persona.worktreeBranch, {
-        personaId: persona.id,
-        personaName: persona.name,
-        reason: "persona deleted (api)",
-      });
-    }
-  }
-
-  // Archived transcripts outlive a reset but not the persona - leaving them
-  // behind would accumulate orphaned directories under data/archives/ that
-  // nothing ever references again.
-  removeArchives(persona.id);
-  personas.delete(persona.id);
-  persistAll();
-  res.status(204).end();
 });
 
 /**
