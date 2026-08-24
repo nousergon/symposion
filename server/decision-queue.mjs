@@ -14,7 +14,8 @@ import { execFileSync } from "node:child_process";
 // mirror it here in the same change.
 const BACKLOG_REPOS = [
   "alpha-engine-config", "metron-ops", "vires-ops", "telos-ops",
-  "symposion", "claude-code-config", "nousergon-console", "oiax"
+  "symposion", "claude-code-config", "nousergon-console", "oiax",
+  "scannerctl"
 ];
 const CODE_REPOS = [
   "alpha-engine-config", "metron-ops", "vires-ops", "telos-ops",
@@ -22,7 +23,7 @@ const CODE_REPOS = [
   "oiax", "nousergon-groomer", "crucible-executor", "crucible-predictor",
   "crucible-research", "crucible-backtester", "crucible-dashboard",
   "crucible-evaluator", "nousergon-data", "nousergon-lib",
-  "nousergon-docs", "metron", "vires", "telos"
+  "nousergon-docs", "metron", "vires", "telos", "scannerctl"
 ];
 
 // Every repo/number pair this module operates on must resolve against this
