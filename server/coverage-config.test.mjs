@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 //
 // Measured on this repo (symposion-I39): node's built-in
 // --experimental-test-coverage reported 92.37% line coverage while omitting 7
-// server modules that were never imported by a test — decision-queue, index,
+// server modules that were never imported by a test — index,
 // opencode-pool, remote-control, secrets, sse-hub and webpush, 3,039 of 4,873
 // server lines, 62%. c8 --all reports the same suite at 34.76%. Both numbers
 // are "correct"; only one of them is about the codebase.
